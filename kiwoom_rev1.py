@@ -5,6 +5,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import ta
 import yfinance as yf
+import requests
 
 # 1. 페이지 레이아웃 설정
 st.set_page_config(
@@ -64,11 +65,15 @@ STOCKS_US = {
 }
 
 
-# 실시간 환율 수집 함수
+# 실시간 환율 수집 함수 (웹 크롤링 차단 우회 세션 적용)
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_usdkrw_rate():
     try:
-        usd_krw = yf.Ticker("USDKRW=X").history(period="5d")
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        usd_krw = yf.Ticker("USDKRW=X", session=session).history(period="5d", timeout=15)
         if not usd_krw.empty:
             rate = float(usd_krw["Close"].dropna().iloc[-1])
             if rate > 0:
@@ -86,8 +91,12 @@ def fetch_index_trend(is_krx):
     """KR: 코스피(^KS11) / US: S&P500(^GSPC) 2년치 데이터로 장기 추세 판단"""
     ticker = "^KS11" if is_krx else "^GSPC"
     try:
-        obj = yf.Ticker(ticker)
-        df = obj.history(period="2y", timeout=10)
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        obj = yf.Ticker(ticker, session=session)
+        df = obj.history(period="2y", timeout=15)
         if not df.empty:
             df.columns = [c.lower() for c in df.columns]
             df["ma50"] = df["close"].rolling(50).mean()
@@ -145,15 +154,12 @@ def calculate_indicators(df):
     df["vol_ma20"] = ta.trend.sma_indicator(df["volume"], window=20)
     df["vol_ratio"] = (df["volume"] / df["vol_ma20"]) * 100
 
-    # --- 신규 추가 지표 ---
-    # ADX: 추세의 "강도"를 측정 (횡보장에서 나오는 가짜 신호를 걸러내기 위함)
     try:
         adx_ind = ta.trend.ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
         df["adx"] = adx_ind.adx()
     except Exception:
         df["adx"] = np.nan
 
-    # OBV: 거래량 누적으로 매집/이탈(수급) 확인
     try:
         obv_ind = ta.volume.OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"])
         df["obv"] = obv_ind.on_balance_volume()
@@ -162,7 +168,6 @@ def calculate_indicators(df):
         df["obv"] = np.nan
         df["obv_ma20"] = np.nan
 
-    # 스토캐스틱: 단기 매수/매도 타이밍 보조 지표
     try:
         stoch_ind = ta.momentum.StochasticOscillator(
             high=df["high"], low=df["low"], close=df["close"], window=14, smooth_window=3
@@ -173,11 +178,9 @@ def calculate_indicators(df):
         df["stoch_k"] = np.nan
         df["stoch_d"] = np.nan
 
-    # 52주 신고가 대비 위치 (과열/돌파 판단)
     df["high_52w"] = df["high"].rolling(252, min_periods=60).max()
     df["pct_from_52w_high"] = (df["close"] / df["high_52w"] - 1) * 100
 
-    # 결측치 보완 (앞/뒤 채움 - 최신 데이터가 없다고 행을 통째로 버리지 않음)
     df = df.ffill().bfill()
     return df
 
@@ -190,7 +193,6 @@ def compute_quant_score(curr):
     reasons = []
     warnings = []
 
-    # 1) 추세 (30점)
     if curr["close"] > curr["ma20"]:
         score += 15
         reasons.append("20일선 상회(단기 상승추세)")
@@ -198,7 +200,6 @@ def compute_quant_score(curr):
         score += 15
         reasons.append("이동평균 정배열(20>60)")
 
-    # 2) 추세 강도 - ADX (10점) : 추세가 실제로 힘이 있는지 확인, 횡보장 가짜신호 필터
     adx = curr.get("adx", np.nan)
     if not pd.isna(adx):
         if adx >= 25:
@@ -207,7 +208,6 @@ def compute_quant_score(curr):
         elif adx < 15:
             warnings.append("추세 미약(횡보장) - 신호 신뢰도 낮음")
 
-    # 3) 모멘텀 - RSI(15점) + 스토캐스틱(10점)
     rsi = curr.get("rsi", np.nan)
     if not pd.isna(rsi):
         if 40 <= rsi <= 65:
@@ -225,12 +225,10 @@ def compute_quant_score(curr):
             score += 10
             reasons.append("스토캐스틱 골든크로스")
 
-    # 4) MACD (15점)
     if curr["macd"] > curr["macd_signal"]:
         score += 15
         reasons.append("MACD 매수 신호")
 
-    # 5) 수급 - 거래량(10점) + OBV(10점)
     if curr["vol_ratio"] >= 120:
         score += 10
         reasons.append("거래량 분출")
@@ -241,13 +239,11 @@ def compute_quant_score(curr):
         score += 10
         reasons.append("OBV 매집신호(수급 우호적)")
 
-    # 6) 상대강도 - 시장(지수) 대비 초과수익 (5점, 보너스)
     rel = curr.get("rel_strength", np.nan)
     if not pd.isna(rel) and rel > 0:
         score += 5
         reasons.append("시장 대비 상대강도 우위")
 
-    # 52주 고점 근접 경고 (과열 주의, 점수에는 미반영 - 경고만)
     pct_52 = curr.get("pct_from_52w_high", np.nan)
     if not pd.isna(pct_52) and pct_52 > -2:
         warnings.append("52주 신고가 근접 - 단기 변동성 유의")
@@ -256,7 +252,6 @@ def compute_quant_score(curr):
 
 
 def get_recommendation_tier(score, regime_score):
-    """점수 + 시장 레짐을 종합한 최종 등급 라벨"""
     if score >= 75:
         tier = "🟢 적극 매수 관심"
     elif score >= 55:
@@ -272,13 +267,9 @@ def get_recommendation_tier(score, regime_score):
 
 
 # ----------------------------------------------------
-# 히스토리 백테스트: "퀀트 점수"가 실제 과거에 얼마나 맞았는지 검증
+# 히스토리 백테스트
 # ----------------------------------------------------
 def backtest_strategy(df, score_threshold=60, sl_mult=1.5, tp_mult=3.0, max_hold=20):
-    """
-    같은 점수 로직으로 과거 신호가 나올 때마다 가상매매를 시뮬레이션하여
-    실제 승률/평균수익률/손익비를 계산한다. (같은 종목 과거 데이터 기반, 미래 보장 아님)
-    """
     trades = []
     n = len(df)
     if n < 90:
@@ -313,7 +304,6 @@ def backtest_strategy(df, score_threshold=60, sl_mult=1.5, tp_mult=3.0, max_hold
         result = None
 
         if hit_sl:
-            # SL/TP가 같은 날 동시에 걸리면 보수적으로 손절 우선 처리 (승률 과대추정 방지)
             exit_price = sl
             result = "loss"
         elif hit_tp:
@@ -360,7 +350,7 @@ def backtest_strategy(df, score_threshold=60, sl_mult=1.5, tp_mult=3.0, max_hold
     return trades_df, stats
 
 
-# 주식 데이터 수집 함수
+# 주식 데이터 수집 함수 (웹 크롤링 차단 우회 세션 적용)
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_stock_data(ticker):
     if not ticker:
@@ -368,13 +358,18 @@ def fetch_stock_data(ticker):
 
     is_krx = ticker.isdigit() or ticker.endswith(".KS") or ticker.endswith(".KQ")
 
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
     # 6자리 숫자인 경우 자동 소속 시장 탐색
     if ticker.isdigit():
         for suffix in [".KS", ".KQ"]:
             sym = f"{ticker}{suffix}"
             try:
-                obj = yf.Ticker(sym)
-                df = obj.history(period="2y", timeout=10)
+                obj = yf.Ticker(sym, session=session)
+                df = obj.history(period="2y", timeout=15)
                 if not df.empty and len(df) >= 60:
                     info = obj.info if hasattr(obj, "info") else {}
                     name = info.get("shortName", info.get("longName", sym))
@@ -384,8 +379,8 @@ def fetch_stock_data(ticker):
         return pd.DataFrame(), ticker, ticker, True
 
     try:
-        obj = yf.Ticker(ticker)
-        df = obj.history(period="2y", timeout=10)
+        obj = yf.Ticker(ticker, session=session)
+        df = obj.history(period="2y", timeout=15)
         if not df.empty and len(df) >= 60:
             info = obj.info if hasattr(obj, "info") else {}
             name = info.get("shortName", info.get("longName", ticker))
@@ -434,7 +429,7 @@ def scan_all_stocks(stock_dict, is_krx, exchange_rate, capital, risk_pct, score_
         max_affordable_qty = int(cap_curr // curr_price) if curr_price > 0 else 0
         qty = min(raw_qty, max_affordable_qty)
         if score < 35:
-            qty = 0  # 약한 신호는 매수수량을 제시하지 않음(관망 권장)
+            qty = 0
 
         _, bt_stats = backtest_strategy(df, score_threshold=score_threshold)
 
@@ -468,7 +463,6 @@ def scan_all_stocks(stock_dict, is_krx, exchange_rate, capital, risk_pct, score_
 # 2. 사이드바 - 분석 모드 및 파라미터 설정
 st.sidebar.header("⚙️ 트레이딩 분석 설정")
 
-# 실행 모드 선택 (충돌 방지)
 app_mode = st.sidebar.radio(
     "🎯 실행 모드 선택",
     ["🔍 선택 종목 개별 정밀 분석", "🚀 전체 종목 TOP 5 스캔"],
@@ -477,7 +471,6 @@ app_mode = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 
-# 자본금 및 리스크 고정 설정
 capital = st.sidebar.number_input(
     "총 자본금 (원화 KRW)", value=1000000, step=100000, format="%d"
 )
@@ -536,7 +529,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
         if df.empty or len(df) < 60:
             st.error(f"❌ [{selected_ticker}] 종목 데이터를 불러올 수 없습니다. 종목 코드나 데이터 수집 상태를 확인하세요.")
         else:
-            # 시장 레짐(지수 추세) 판정 및 상대강도 병합
             idx_df = fetch_index_trend(is_krx)
             regime_label, regime_icon, regime_score = get_market_regime(idx_df)
             df = add_relative_strength(df, idx_df)
@@ -553,7 +545,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             currency = "KRW (원)" if is_krx else "USD ($)"
             fmt = "{:,.0f}" if is_krx else "{:,.2f}"
 
-            # 시장 레짐 배너
             bench_name = "코스피(KOSPI)" if is_krx else "S&P500"
             if regime_score > 0:
                 st.success(f"{regime_icon} 현재 {bench_name} 기준 시장 환경: **{regime_label}** — 추세 매매에 우호적인 환경입니다.")
@@ -562,7 +553,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             else:
                 st.info(f"{regime_icon} 현재 {bench_name} 기준 시장 환경: **{regime_label}**")
 
-            # 대시보드 메트릭
             st.subheader(f"📌 {stock_name} ({symbol_formatted}) - 실시간 종합 진단")
             st.markdown(f"**종합 추천 등급: {tier}**")
 
@@ -581,7 +571,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
             st.markdown("---")
 
-            # 통화 및 리스크 수량 계산 (해외주식 환율 반영)
             if is_krx:
                 capital_curr = capital
             else:
@@ -589,14 +578,12 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             max_risk_cash = capital_curr * (risk_pct / 100.0)
             max_affordable_qty = int(capital_curr // curr_price) if curr_price > 0 else 0
 
-            # 스윙 전략 (ATR 1.5배, 1:2 손익비)
             stop_dist_swing = curr_atr * 1.5
             sl_swing = curr_price - stop_dist_swing
             tp_swing = curr_price + (stop_dist_swing * 2.0)
             raw_qty_swing = int(max_risk_cash / stop_dist_swing) if stop_dist_swing > 0 else 0
             qty_swing = min(raw_qty_swing, max_affordable_qty)
 
-            # 초단기 모멘텀 전략 (ATR 0.8배, 1:1.8 손익비) - 데이터는 일봉 기준
             stop_dist_day = curr_atr * 0.8
             sl_day = curr_price - stop_dist_day
             tp_day = curr_price + (stop_dist_day * 1.8)
@@ -605,7 +592,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
             weak_signal = score < 35
 
-            # 차트 그리기 (가격/거래량 + RSI·ADX 보조지표)
             st.markdown("### 📉 기술적 파동 및 목표/손절 라인 차트")
             fig = make_subplots(
                 rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
@@ -633,9 +619,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
             st.markdown("---")
 
-            # ----------------------------------------------------
-            # 히스토리 백테스트 결과 - "이 로직이 과거에 실제로 얼마나 맞았는가"
-            # ----------------------------------------------------
             st.markdown("### 🧪 히스토리 백테스트 (동일 로직의 과거 승률 검증)")
             st.caption(
                 f"최근 2년 데이터에서 '퀀트 점수 ≥ {score_threshold}점' 신호가 뜰 때마다 "
@@ -662,7 +645,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
             st.markdown("---")
 
-            # 실전 트레이딩 브리핑
             st.markdown("### 🎯 실전 트레이딩 전략 및 산출 근거")
 
             if weak_signal:
@@ -686,7 +668,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
                 swing_risk_val = f"**${max_risk_cash:,.2f}** (약 {max_risk_cash * exchange_rate:,.0f} 원)"
                 day_risk_val = f"**${max_risk_cash:,.2f}** (약 {max_risk_cash * exchange_rate:,.0f} 원)"
 
-            # 알고리즘 근거 박스
             with st.expander("💡 **[핵심 근거] 분석 알고리즘 및 계산 원리 보기**", expanded=True):
                 st.markdown(f"""
                 * **1. 시장 레짐 필터:** {bench_name} 지수가 50일선/200일선 위·아래에 있는지로 현재 시장이 **{regime_label}** 인지 먼저 판단합니다. 개별 종목 신호가 좋아도 하락장에서는 승률이 떨어지는 경향이 있습니다.
@@ -698,7 +679,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
                 * ⚠️ **초단기 전략에 대한 주의:** 이 시스템의 모든 지표는 **일봉(하루 단위) 데이터**로 계산됩니다. 분·초 단위 장중 데이터가 아니므로 "당일 스캘핑"의 정밀한 타이밍 근거로 쓰기엔 한계가 있습니다. 초단기 전략은 참고용 보조 지표로만 활용하세요.
                 """)
 
-            # 스윙 전략 카드
             with st.container(border=True):
                 st.markdown("#### 🏆 [스윙 트레이딩] 중기 파동 전략")
                 st.caption("권장 보유기간: 3일 ~ 3주 | 변동성(ATR 1.5배) 기반 | 기대 손익비 1 : 2")
@@ -713,7 +693,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
                     unsafe_allow_html=True,
                 )
 
-            # 초단기 모멘텀 전략 카드
             with st.container(border=True):
                 st.markdown("#### ⚡ [초단기 모멘텀] 1~3거래일 전략")
                 st.caption("권장 보유기간: 1~3거래일 (일봉 기준 근사치) | 변동성(ATR 0.8배) 기반 | 기대 손익비 1 : 1.8")
