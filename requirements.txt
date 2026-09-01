@@ -5,4 +5,4 @@ plotly
 ta
 google-genai
 numpy
-yfinance
+yfinance>=0.2.38
