@@ -1,3 +1,7 @@
+import os
+import tempfile
+import time
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -5,6 +9,57 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import ta
 import yfinance as yf
+
+# ----------------------------------------------------
+# Streamlit Community Cloud 등 클라우드 환경 대응
+# ----------------------------------------------------
+# 1) yfinance 캐시 폴더를 임시디렉토리로 강제 지정
+#    (클라우드 컨테이너의 기본 캐시 경로(/home/appuser/.cache 등)에 쓰기 권한이 없어
+#     "FileNotFoundError"로 조용히 실패하는 문제를 예방)
+try:
+    _cache_dir = os.path.join(tempfile.gettempdir(), "yfinance_cache")
+    os.makedirs(_cache_dir, exist_ok=True)
+    yf.set_tz_cache_location(_cache_dir)
+except Exception:
+    pass
+
+# 2) 브라우저로 위장한 요청 세션 생성
+#    Yahoo Finance가 최근 데이터센터/클라우드 공용 IP(AWS 등, Streamlit Cloud 포함)에서 오는
+#    요청을 봇으로 판단해 차단하는 경우가 매우 많습니다. curl_cffi로 실제 브라우저(Chrome)의
+#    TLS 지문을 흉내내면 이 차단을 상당 부분 우회할 수 있습니다.
+#    (requirements.txt에 curl_cffi가 포함되어 있어야 동작합니다)
+@st.cache_resource(show_spinner=False)
+def get_yf_session():
+    try:
+        from curl_cffi import requests as cffi_requests
+        return cffi_requests.Session(impersonate="chrome")
+    except Exception:
+        return None
+
+
+def _yf_ticker(symbol):
+    session = get_yf_session()
+    if session is not None:
+        return yf.Ticker(symbol, session=session)
+    return yf.Ticker(symbol)
+
+
+def _fetch_history_with_retry(symbol, period="2y", retries=2, base_delay=1.5):
+    """일시적 오류/차단에 대비해 짧은 대기 후 재시도. 마지막 예외 메시지를 함께 반환."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            obj = _yf_ticker(symbol)
+            df = obj.history(period=period, timeout=15)
+            if df is not None and not df.empty:
+                return obj, df, None
+            last_err = "빈 데이터 응답(empty response)"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            time.sleep(base_delay * (attempt + 1))
+    return None, pd.DataFrame(), last_err
+
 
 # 1. 페이지 레이아웃 설정
 st.set_page_config(
@@ -67,15 +122,12 @@ STOCKS_US = {
 # 실시간 환율 수집 함수
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_usdkrw_rate():
-    try:
-        usd_krw = yf.Ticker("USDKRW=X").history(period="5d")
-        if not usd_krw.empty:
-            rate = float(usd_krw["Close"].dropna().iloc[-1])
-            if rate > 0:
-                return rate
-    except Exception:
-        pass
-    return 1350.0
+    _obj, df, err = _fetch_history_with_retry("USDKRW=X", period="5d")
+    if not df.empty:
+        rate = float(df["Close"].dropna().iloc[-1])
+        if rate > 0:
+            return rate, None
+    return 1350.0, err
 
 
 # ----------------------------------------------------
@@ -85,17 +137,13 @@ def get_usdkrw_rate():
 def fetch_index_trend(is_krx):
     """KR: 코스피(^KS11) / US: S&P500(^GSPC) 2년치 데이터로 장기 추세 판단"""
     ticker = "^KS11" if is_krx else "^GSPC"
-    try:
-        obj = yf.Ticker(ticker)
-        df = obj.history(period="2y", timeout=10)
-        if not df.empty:
-            df.columns = [c.lower() for c in df.columns]
-            df["ma50"] = df["close"].rolling(50).mean()
-            df["ma200"] = df["close"].rolling(200).mean()
-            return df
-    except Exception:
-        pass
-    return pd.DataFrame()
+    _obj, df, err = _fetch_history_with_retry(ticker, period="2y")
+    if not df.empty:
+        df.columns = [c.lower() for c in df.columns]
+        df["ma50"] = df["close"].rolling(50).mean()
+        df["ma200"] = df["close"].rolling(200).mean()
+        return df, None
+    return pd.DataFrame(), err
 
 
 def get_market_regime(idx_df):
@@ -364,47 +412,52 @@ def backtest_strategy(df, score_threshold=60, sl_mult=1.5, tp_mult=3.0, max_hold
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_stock_data(ticker):
     if not ticker:
-        return pd.DataFrame(), ticker, ticker, False
+        return pd.DataFrame(), ticker, ticker, False, "티커가 비어 있습니다."
 
     is_krx = ticker.isdigit() or ticker.endswith(".KS") or ticker.endswith(".KQ")
+    last_err = None
 
-    # 6자리 숫자인 경우 자동 소속 시장 탐색
+    # 6자리 숫자인 경우 자동 소속 시장 탐색 (.KS 우선, 실패 시 .KQ)
     if ticker.isdigit():
         for suffix in [".KS", ".KQ"]:
             sym = f"{ticker}{suffix}"
-            try:
-                obj = yf.Ticker(sym)
-                df = obj.history(period="2y", timeout=10)
-                if not df.empty and len(df) >= 60:
+            obj, df, err = _fetch_history_with_retry(sym, period="2y")
+            if not df.empty and len(df) >= 60:
+                name = sym
+                try:
                     info = obj.info if hasattr(obj, "info") else {}
                     name = info.get("shortName", info.get("longName", sym))
-                    return calculate_indicators(df), name, sym, True
-            except Exception:
-                continue
-        return pd.DataFrame(), ticker, ticker, True
+                except Exception:
+                    pass  # info 조회 실패해도 가격 데이터는 이미 확보됨
+                return calculate_indicators(df), name, sym, True, None
+            last_err = err
+        return pd.DataFrame(), ticker, ticker, True, last_err
 
-    try:
-        obj = yf.Ticker(ticker)
-        df = obj.history(period="2y", timeout=10)
-        if not df.empty and len(df) >= 60:
+    obj, df, err = _fetch_history_with_retry(ticker, period="2y")
+    if not df.empty and len(df) >= 60:
+        name = ticker
+        try:
             info = obj.info if hasattr(obj, "info") else {}
             name = info.get("shortName", info.get("longName", ticker))
-            return calculate_indicators(df), name, ticker, is_krx
-    except Exception:
-        pass
+        except Exception:
+            pass
+        return calculate_indicators(df), name, ticker, is_krx, None
 
-    return pd.DataFrame(), ticker, ticker, is_krx
+    return pd.DataFrame(), ticker, ticker, is_krx, err
 
 
 # 전체 종목 스캐닝 함수
 def scan_all_stocks(stock_dict, is_krx, exchange_rate, capital, risk_pct, score_threshold):
     results = []
+    failed = []  # (종목명, 티커, 실패사유) - 디버그용
     total = len([k for k, v in stock_dict.items() if v != "CUSTOM"])
     progress_bar = st.progress(0)
     count = 0
 
-    idx_df = fetch_index_trend(is_krx)
+    idx_df, idx_err = fetch_index_trend(is_krx)
     regime_label, regime_icon, regime_score = get_market_regime(idx_df)
+    if idx_err:
+        failed.append(("(벤치마크 지수)", "^KS11" if is_krx else "^GSPC", idx_err))
 
     for name, ticker in stock_dict.items():
         if ticker == "CUSTOM":
@@ -413,8 +466,9 @@ def scan_all_stocks(stock_dict, is_krx, exchange_rate, capital, risk_pct, score_
         count += 1
         progress_bar.progress(count / total)
 
-        df, s_name, sym, _ = fetch_stock_data(ticker)
+        df, s_name, sym, _, err = fetch_stock_data(ticker)
         if df.empty or len(df) < 60:
+            failed.append((name, ticker, err or "알 수 없는 오류"))
             continue
 
         df = add_relative_strength(df, idx_df)
@@ -462,7 +516,7 @@ def scan_all_stocks(stock_dict, is_krx, exchange_rate, capital, risk_pct, score_
         res_df = res_df.sort_values(
             by=["퀀트점수", "_win_sort"], ascending=[False, False]
         ).drop(columns="_win_sort").reset_index(drop=True)
-    return res_df, regime_label, regime_icon
+    return res_df, regime_label, regime_icon, failed
 
 
 # 2. 사이드바 - 분석 모드 및 파라미터 설정
@@ -495,8 +549,15 @@ with st.sidebar.expander("🔧 고급 설정 (백테스트 신호 기준)"):
         "백테스트/추천 신호 최소 점수", min_value=40, max_value=90, value=60, step=5,
         help="이 점수 이상일 때만 '매수 신호'로 간주하고 과거 승률을 검증합니다."
     )
+    debug_mode = st.checkbox(
+        "🐞 디버그 모드 (데이터 수집 실패 원인 표시)",
+        value=False,
+        help="클라우드 배포 환경 등에서 데이터를 못 불러올 때, 실제 오류 메시지를 화면에 표시합니다.",
+    )
 
-exchange_rate = get_usdkrw_rate()
+exchange_rate, fx_err = get_usdkrw_rate()
+if fx_err and debug_mode:
+    st.sidebar.caption(f"⚠️ 환율 조회 실패(기본값 1350원 사용): {fx_err}")
 
 
 # ----------------------------------------------------
@@ -531,14 +592,23 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
     if run_analysis or "analyzed" not in st.session_state:
         st.session_state["analyzed"] = True
 
-        df, stock_name, symbol_formatted, is_krx = fetch_stock_data(selected_ticker)
+        df, stock_name, symbol_formatted, is_krx, fetch_err = fetch_stock_data(selected_ticker)
 
         if df.empty or len(df) < 60:
             st.error(f"❌ [{selected_ticker}] 종목 데이터를 불러올 수 없습니다. 종목 코드나 데이터 수집 상태를 확인하세요.")
+            if fetch_err:
+                st.caption(f"오류 상세: {fetch_err}")
+            st.info(
+                "💡 노트북/PC에서는 되는데 배포된(Streamlit Cloud 등) 환경에서만 안 된다면, "
+                "Yahoo Finance가 클라우드 서버의 공용 IP를 일시적으로 차단했을 가능성이 높습니다. "
+                "requirements.txt에 `curl_cffi`가 포함되어 있는지 확인하고, 잠시 후 다시 시도해보세요."
+            )
         else:
             # 시장 레짐(지수 추세) 판정 및 상대강도 병합
-            idx_df = fetch_index_trend(is_krx)
+            idx_df, idx_err = fetch_index_trend(is_krx)
             regime_label, regime_icon, regime_score = get_market_regime(idx_df)
+            if idx_err and debug_mode:
+                st.caption(f"⚠️ 지수(벤치마크) 데이터 조회 실패: {idx_err}")
             df = add_relative_strength(df, idx_df)
 
             curr = df.iloc[-1]
@@ -742,10 +812,19 @@ else:
 
         with tab_kr:
             with st.spinner("국내 19개 종목 실시간 차트, 퀀트 지표 및 백테스트 분석 중..."):
-                df_top_kr, regime_label_kr, regime_icon_kr = scan_all_stocks(
+                df_top_kr, regime_label_kr, regime_icon_kr, failed_kr = scan_all_stocks(
                     STOCKS_KR, True, exchange_rate, capital, risk_pct, score_threshold
                 )
             st.markdown(f"**{regime_icon_kr} 코스피 시장 환경: {regime_label_kr}**")
+
+            if failed_kr:
+                st.warning(f"⚠️ {len(failed_kr)}개 종목의 데이터를 불러오지 못했습니다.")
+                if debug_mode:
+                    with st.expander("실패 종목 상세 사유 보기"):
+                        st.dataframe(
+                            pd.DataFrame(failed_kr, columns=["종목명", "티커", "실패사유"]),
+                            use_container_width=True, hide_index=True,
+                        )
 
             if not df_top_kr.empty:
                 top5_kr = df_top_kr.head(5)
@@ -769,10 +848,19 @@ else:
 
         with tab_us:
             with st.spinner("해외 18개 종목 실시간 차트, 퀀트 지표 및 백테스트 분석 중..."):
-                df_top_us, regime_label_us, regime_icon_us = scan_all_stocks(
+                df_top_us, regime_label_us, regime_icon_us, failed_us = scan_all_stocks(
                     STOCKS_US, False, exchange_rate, capital, risk_pct, score_threshold
                 )
             st.markdown(f"**{regime_icon_us} S&P500 시장 환경: {regime_label_us}**")
+
+            if failed_us:
+                st.warning(f"⚠️ {len(failed_us)}개 종목의 데이터를 불러오지 못했습니다.")
+                if debug_mode:
+                    with st.expander("실패 종목 상세 사유 보기"):
+                        st.dataframe(
+                            pd.DataFrame(failed_us, columns=["종목명", "티커", "실패사유"]),
+                            use_container_width=True, hide_index=True,
+                        )
 
             if not df_top_us.empty:
                 top5_us = df_top_us.head(5)
