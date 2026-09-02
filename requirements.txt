@@ -1,8 +1,7 @@
 streamlit
-ccxt
+yfinance
+curl_cffi
 pandas
+numpy
 plotly
 ta
-google-genai
-numpy
-yfinance>=0.2.38
