@@ -5,7 +5,6 @@ import time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
 import ta
 import yfinance as yf
@@ -39,7 +38,6 @@ def _yf_ticker(symbol):
 
 
 def _fetch_history_with_retry(symbol, period="2y", retries=2, base_delay=1.5):
-  """일시적 오류/차단에 대비해 짧은 대기 후 재시도. 마지막 예외 메시지를 함께 반환."""
   last_err = None
   for attempt in range(retries + 1):
     try:
@@ -62,13 +60,13 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("⚡ 주가 정밀 분석 및 TOP 5 추천 시스템")
+st.title("⚡ 주가 정밀분석 및 TOP 5 추천시스템")
 st.caption(
     "실시간 파동, 변동성(ATR), 수급 모멘텀, 시장 레짐 및 히스토리 백테스트 기반 매매 전략"
 )
 st.markdown("---")
 
-# 국내 주식 19개 종목 사전
+# 국내 주식 사전 (한국어 명칭)
 STOCKS_KR = {
     "삼성전자": "005930.KS",
     "SK하이닉스": "000660.KS",
@@ -114,6 +112,16 @@ STOCKS_US = {
     "✏️ 해외주식 티커 직접 입력": "CUSTOM",
 }
 
+# 역방향 매핑 (티커/코드 -> 한국어 종목명)
+TICKER_TO_NAME = {}
+for k, v in STOCKS_KR.items():
+  if v != "CUSTOM":
+    TICKER_TO_NAME[v] = k
+    TICKER_TO_NAME[v.split(".")[0]] = k
+for k, v in STOCKS_US.items():
+  if v != "CUSTOM":
+    TICKER_TO_NAME[v] = k
+
 
 # 실시간 환율 수집 함수
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -127,7 +135,7 @@ def get_usdkrw_rate():
 
 
 # ----------------------------------------------------
-# 시장 레짐(강세/약세) 판단 - 벤치마크 지수 추세
+# 시장 레짐(강세/약세) 판단
 # ----------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_index_trend(is_krx):
@@ -165,7 +173,7 @@ def add_relative_strength(df, idx_df, lookback=20):
   return df
 
 
-# 지표 계산 및 NaN 정제 함수
+# 지표 계산 함수
 def calculate_indicators(df):
   df = df.copy()
   df.columns = [c.lower() for c in df.columns]
@@ -227,9 +235,7 @@ def calculate_indicators(df):
   return df
 
 
-# ----------------------------------------------------
-# 퀀트 점수 계산 함수
-# ----------------------------------------------------
+# 퀀트 점수 계산
 def compute_quant_score(curr):
   score = 0
   reasons = []
@@ -308,9 +314,7 @@ def get_recommendation_tier(score, regime_score):
   return tier
 
 
-# ----------------------------------------------------
-# 히스토리 백테스트
-# ----------------------------------------------------
+# 백테스트 함수
 def backtest_strategy(
     df, score_threshold=60, sl_mult=1.5, tp_mult=3.0, max_hold=20
 ):
@@ -400,41 +404,34 @@ def backtest_strategy(
   return trades_df, stats
 
 
-# 주식 데이터 수집 함수
+# 주식 데이터 수집 함수 (한국어 이름 보장 패치 적용)
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_stock_data(ticker):
+def fetch_stock_data(ticker, custom_display_name=None):
   if not ticker:
     return pd.DataFrame(), ticker, ticker, False, "티커가 비어 있습니다."
 
   is_krx = ticker.isdigit() or ticker.endswith(".KS") or ticker.endswith(".KQ")
   last_err = None
 
+  # 한국어 display_name 확정
+  display_name = (
+      custom_display_name or TICKER_TO_NAME.get(ticker) or ticker
+  )
+
   if ticker.isdigit():
     for suffix in [".KS", ".KQ"]:
       sym = f"{ticker}{suffix}"
       obj, df, err = _fetch_history_with_retry(sym, period="2y")
       if not df.empty and len(df) >= 60:
-        name = sym
-        try:
-          info = obj.info if hasattr(obj, "info") else {}
-          name = info.get("shortName", info.get("longName", sym))
-        except Exception:
-          pass
-        return calculate_indicators(df), name, sym, True, None
+        return calculate_indicators(df), display_name, sym, True, None
       last_err = err
-    return pd.DataFrame(), ticker, ticker, True, last_err
+    return pd.DataFrame(), display_name, ticker, True, last_err
 
   obj, df, err = _fetch_history_with_retry(ticker, period="2y")
   if not df.empty and len(df) >= 60:
-    name = ticker
-    try:
-      info = obj.info if hasattr(obj, "info") else {}
-      name = info.get("shortName", info.get("longName", ticker))
-    except Exception:
-      pass
-    return calculate_indicators(df), name, ticker, is_krx, None
+    return calculate_indicators(df), display_name, ticker, is_krx, None
 
-  return pd.DataFrame(), ticker, ticker, is_krx, err
+  return pd.DataFrame(), display_name, ticker, is_krx, err
 
 
 # 전체 종목 스캐닝 함수
@@ -459,7 +456,7 @@ def scan_all_stocks(
     count += 1
     progress_bar.progress(count / total)
 
-    df, s_name, sym, _, err = fetch_stock_data(ticker)
+    df, s_name, sym, _, err = fetch_stock_data(ticker, custom_display_name=name)
     if df.empty or len(df) < 60:
       failed.append((name, ticker, err or "알 수 없는 오류"))
       continue
@@ -475,9 +472,6 @@ def scan_all_stocks(
     cap_curr = capital if is_krx else capital / exchange_rate
     max_risk_cash = cap_curr * (risk_pct / 100.0)
 
-    # ----------------------------------------------------
-    # 3단계 분할 매수 산출 로직 (30%:40%:30%)
-    # ----------------------------------------------------
     ma5_val = (
         float(curr["ma5"]) if not pd.isna(curr["ma5"]) else curr_price
     )
@@ -488,11 +482,8 @@ def scan_all_stocks(
         float(curr["ma60"]) if not pd.isna(curr["ma60"]) else curr_price * 0.95
     )
 
-    # 1차 진입가: Min(5일선, 현재가 - 0.5 * ATR)
     e1 = min(ma5_val, curr_price - 0.5 * curr_atr)
-    # 2차 진입가: Min(1차 진입가 - 1.0 * ATR, 20일선)
     e2 = min(e1 - 1.0 * curr_atr, ma20_val)
-    # 3차 진입가: Min(1차 진입가 - 2.0 * ATR, 60일선)
     e3 = min(e1 - 2.0 * curr_atr, ma60_val)
 
     avg_price = (e1 * 0.3) + (e2 * 0.4) + (e3 * 0.3)
@@ -551,7 +542,7 @@ def scan_all_stocks(
   return res_df, regime_label, regime_icon, failed
 
 
-# 2. 사이드바 - 분석 모드 및 파라미터 설정
+# 2. 사이드바 설정
 st.sidebar.header("⚙️ 트레이딩 분석 설정")
 
 app_mode = st.sidebar.radio(
@@ -571,10 +562,6 @@ risk_pct = st.sidebar.slider(
     max_value=5.0,
     value=3.0,
     step=0.25,
-    help=(
-        "1회 거래당 계좌의 몇 %까지 손실을 허용할지 정합니다. 값이 클수록 추천"
-        " 매수 수량이 늘어나지만 손실 위험도 커집니다."
-    ),
 )
 
 with st.sidebar.expander("🔧 고급 설정 (백테스트 신호 기준)"):
@@ -584,18 +571,9 @@ with st.sidebar.expander("🔧 고급 설정 (백테스트 신호 기준)"):
       max_value=90,
       value=60,
       step=5,
-      help=(
-          "이 점수 이상일 때만 '매수 신호'로 간주하고 과거 승률을"
-          " 검증합니다."
-      ),
   )
   debug_mode = st.checkbox(
-      "🐞 디버그 모드 (데이터 수집 실패 원인 표시)",
-      value=False,
-      help=(
-          "클라우드 배포 환경 등에서 데이터를 못 불러올 때, 실제 오류 메시지를"
-          " 화면에 표시합니다."
-      ),
+      "🐞 디버그 모드 (데이터 수집 실패 원인 표시)", value=False
   )
 
 exchange_rate, fx_err = get_usdkrw_rate()
@@ -613,6 +591,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
   )
 
   selected_ticker = "005930"
+  selected_display_name = "삼성전자"
 
   if market_type == "해외주식 (US)":
     selected_name = st.sidebar.selectbox(
@@ -624,8 +603,10 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           .strip()
           .upper()
       )
+      selected_display_name = selected_ticker
     else:
       selected_ticker = STOCKS_US[selected_name]
+      selected_display_name = selected_name
   else:
     selected_name = st.sidebar.selectbox(
         "🇰🇷 국내주식 종목 선택", list(STOCKS_KR.keys())
@@ -638,8 +619,12 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           .strip()
           .upper()
       )
+      selected_display_name = (
+          TICKER_TO_NAME.get(selected_ticker) or selected_ticker
+      )
     else:
       selected_ticker = STOCKS_KR[selected_name]
+      selected_display_name = selected_name
 
   run_analysis = st.sidebar.button(
       "🚀 정밀 분석 & 전략 생성", type="primary", use_container_width=True
@@ -649,13 +634,13 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
     st.session_state["analyzed"] = True
 
     df, stock_name, symbol_formatted, is_krx, fetch_err = fetch_stock_data(
-        selected_ticker
+        selected_ticker, custom_display_name=selected_display_name
     )
 
     if df.empty or len(df) < 60:
       st.error(
-          f"❌ [{selected_ticker}] 종목 데이터를 불러올 수 없습니다. 종목 코드나"
-          " 데이터 수집 상태를 확인하세요."
+          f"❌ [{selected_display_name}] 종목 데이터를 불러올 수 없습니다."
+          " 종목 코드나 데이터 수집 상태를 확인하세요."
       )
       if fetch_err:
         st.caption(f"오류 상세: {fetch_err}")
@@ -679,7 +664,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
       score, reasons, warns = compute_quant_score(curr)
       tier = get_recommendation_tier(score, regime_score)
 
-      currency = "원" if is_krx else "USD ($)"
+      currency = "KRW (원)" if is_krx else "USD ($)"
       fmt = "{:,.0f}" if is_krx else "{:,.2f}"
 
       bench_name = "코스피(KOSPI)" if is_krx else "S&P500"
@@ -718,15 +703,9 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
       st.markdown("---")
 
-      if is_krx:
-        capital_curr = capital
-      else:
-        capital_curr = capital / exchange_rate
+      capital_curr = capital if is_krx else capital / exchange_rate
       max_risk_cash = capital_curr * (risk_pct / 100.0)
 
-      # ----------------------------------------------------
-      # 3단계 분할 매수 계산 (스윙 전략)
-      # ----------------------------------------------------
       ma5_val = (
           float(curr["ma5"]) if not pd.isna(curr["ma5"]) else curr_price
       )
@@ -737,14 +716,10 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           float(curr["ma60"]) if not pd.isna(curr["ma60"]) else curr_price * 0.95
       )
 
-      # 1차 진입가: Min(5일선, 현재가 - 0.5 * ATR)
       entry1_price = min(ma5_val, curr_price - 0.5 * curr_atr)
-      # 2차 진입가: Min(1차 진입가 - 1.0 * ATR, 20일선)
       entry2_price = min(entry1_price - 1.0 * curr_atr, ma20_val)
-      # 3차 진입가: Min(1차 진입가 - 2.0 * ATR, 60일선)
       entry3_price = min(entry1_price - 2.0 * curr_atr, ma60_val)
 
-      # 30% : 40% : 30% 비율 반영 평균 단가
       avg_entry_price = (
           (entry1_price * 0.3) + (entry2_price * 0.4) + (entry3_price * 0.3)
       )
@@ -791,12 +766,9 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
       st.markdown("### 📱 모바일 최적화 실시간 파동 차트")
 
-      # 모바일 최적화: 최근 90일 데이터 사용
       df_chart = df.tail(90)
-
       fig = go.Figure()
 
-      # 1. 캔들스틱
       fig.add_trace(
           go.Candlestick(
               x=df_chart.index,
@@ -810,7 +782,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           )
       )
 
-      # 2. 이동평균선
       fig.add_trace(
           go.Scatter(
               x=df_chart.index,
@@ -830,7 +801,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           )
       )
 
-      # 3. 목표가 및 손절가 수평선
       fig.add_hline(
           y=sl_swing,
           line_dash="dash",
@@ -853,7 +823,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           annotation_position="top right",
       )
 
-      # 모바일 호환성 100% 검증 레이아웃 설정 (ValueError 원인 완벽 제거)
       fig.update_layout(
           height=380,
           margin=dict(l=10, r=10, t=25, b=10),
@@ -901,7 +870,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
       st.markdown("---")
 
-      st.markdown("### 🎯 실전 트레이딩 전략 및 산출 근거")
+      st.markdown("### 🎯 매매 전략 및 산출 근거")
 
       if weak_signal:
         st.warning(
@@ -910,15 +879,10 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
         )
 
       if is_krx:
-        cap_desc = f"총 자본금({capital:,.0f}원)"
         risk_desc = f"{max_risk_cash:,.0f}원"
         swing_buy_val = f"약 {qty_swing * avg_entry_price:,.0f} 원"
         swing_risk_val = f"**{max_risk_cash:,.0f} 원**"
       else:
-        cap_desc = (
-            f"총 자본금({capital:,.0f}원 / 약 ${capital_curr:,.2f}, 적용환율:"
-            f" {exchange_rate:,.1f}원/$)"
-        )
         risk_desc = (
             f"${max_risk_cash:,.2f} (약 {max_risk_cash * exchange_rate:,.0f}원)"
         )
@@ -931,10 +895,8 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             f" {max_risk_cash * exchange_rate:,.0f} 원)"
         )
 
-      # 선택된 종목의 지표에 따라 진단 근거 동적 작성
       dynamic_reasons = []
 
-      # 1. 이동평균 및 추세 상태
       if curr_price > ma20_val and ma20_val > ma60_val:
         dynamic_reasons.append(
             f"**[추세]** {stock_name}은(는) 현재 정배열 구도로 단기 및 중기"
@@ -954,7 +916,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             " 유효합니다."
         )
 
-      # 2. RSI 및 모멘텀 상태
       if curr_rsi >= 70:
         dynamic_reasons.append(
             f"**[모멘텀]** RSI가 {curr_rsi:.1f}로 과매수 구간에 진입해 있어 1차"
@@ -963,7 +924,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
         )
       elif 40 <= curr_rsi < 70:
         dynamic_reasons.append(
-            f"**[모멘텀]** RSI가 {curr_rsi:.1f}로과열되지 않은 건전한 수급 상승"
+            f"**[모멘텀]** RSI가 {curr_rsi:.1f}로 과열되지 않은 건전한 수급 상승"
             " 영역에 위치해 안정적인 매수 구간입니다."
         )
       else:
@@ -972,7 +933,6 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             " 반등을 겨냥한 보수적 분할 매수가 타당합니다."
         )
 
-      # 3. 거래량 수급 상태
       if vol_ratio >= 120:
         dynamic_reasons.append(
             f"**[수급]** 최근 거래량이 20일 평균 대비 {vol_ratio:.1f}% 증가하며"
@@ -985,16 +945,14 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             " 접근이 안전합니다."
         )
 
-      # 4. ATR 및 진입/리스크 설정 이유
       dynamic_reasons.append(
           f"**[가격/리스크]** 최근 14일 평균 변동폭(ATR: {fmt.format(curr_atr)})을"
           f" 반영하여, 손절가를 평단 대비 {stop_dist_swing:,.1f}"
-          f" 하단({fmt.format(sl_swing)})으로 정했습니다. 이는 노이즈에 의해서"
-          " 손절되지 않으면서도 계좌 자본 위험을 정확히"
-          f" **{risk_pct}%({risk_desc})** 이내로 제한하기 위함입니다."
+          f" 하단({fmt.format(sl_swing)})으로 정했습니다. 이는 계좌 자본"
+          f" 위험을 정확히 **{risk_pct}%({risk_desc})** 이내로 제한하기"
+          " 위함입니다."
       )
 
-      # 동적 근거 텍스트 변환
       reason_bullets = "\n".join([f"* {r}" for r in dynamic_reasons])
 
       with st.expander(
@@ -1006,9 +964,8 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
                 * **[시장 레짐 종합]** 현재 {bench_name} 지수는 **{regime_label}** 상태로, 이 시장 환경과 {stock_name}의 기술적 지표(퀀트 {score}점)를 종합 계산하여 최적의 수량({qty_swing}주)과 타겟 가격을 산출했습니다.
                 """)
 
-      # 스윙 전략 카드
       with st.container(border=True):
-        st.markdown("#### 🏆 [스윙 트레이딩]전략 어드바이스")
+        st.markdown("#### 🏆 전략 어드바이스")
         st.caption(
             "권장 보유기간: 3일 ~ 3주 | 이동평균선 및 ATR 조합 기반 3단계 분할 매수 & 2단계 분할 익절"
         )
