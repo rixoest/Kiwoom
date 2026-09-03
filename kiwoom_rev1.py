@@ -547,7 +547,7 @@ st.sidebar.header("⚙️ 트레이딩 분석 설정")
 
 app_mode = st.sidebar.radio(
     "🎯 실행 모드 선택",
-    ["🔍 선택 종목 개별 정밀 분석", "🚀 전체 종목 TOP 5 스캔"],
+    ["선택 종목 개별 정밀 분석", "전체 종목 TOP 5 스캔"],
     index=0,
 )
 
@@ -584,7 +584,7 @@ if fx_err and debug_mode:
 # ----------------------------------------------------
 # 모드 1: 선택 종목 개별 정밀 분석
 # ----------------------------------------------------
-if app_mode == "🔍 선택 종목 개별 정밀 분석":
+if app_mode == "선택 종목 개별 정밀 분석":
   st.sidebar.markdown("---")
   market_type = st.sidebar.radio(
       "🌐 시장 선택", ["국내주식 (KRX)", "해외주식 (US)"], index=0, horizontal=True
@@ -664,7 +664,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
       score, reasons, warns = compute_quant_score(curr)
       tier = get_recommendation_tier(score, regime_score)
 
-      currency = "KRW (원)" if is_krx else "USD ($)"
+      currency = "(원)" if is_krx else "($)"
       fmt = "{:,.0f}" if is_krx else "{:,.2f}"
 
       bench_name = "코스피(KOSPI)" if is_krx else "S&P500"
@@ -685,7 +685,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             f" **{regime_label}**"
         )
 
-      st.subheader(f"📌 {stock_name} ({symbol_formatted}) - 실시간 종합 진단")
+      st.subheader(f"📌 {stock_name} - 실시간 종합 진단")
       st.markdown(f"**종합 추천 등급: {tier}**")
 
       m1, m2, m3, m4, m5 = st.columns(5)
