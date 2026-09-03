@@ -890,7 +890,7 @@ if app_mode == "선택 종목 개별 정밀 분석":
       )
 
     # ----------------------------------------------------
-    # [핵심] Gemini API 연동 실시간 Q&A AI 어드바이저
+    # [핵심] Gemini API 연동 실시간 Q&A AI 어드바이저 (503 대응 로직 반영)
     # ----------------------------------------------------
     st.markdown("---")
     st.subheader(f"💬 {cache['stock_name']} 실시간 AI 어드바이저 Q&A")
@@ -919,11 +919,7 @@ if app_mode == "선택 종목 개별 정밀 분석":
       else:
         with st.chat_message("assistant"):
           with st.spinner("AI가 질문을 분석하여 맞춤 매매 전략을 재산출 중입니다..."):
-            try:
-              client = genai.Client(api_key=GEMINI_API_KEY)
-
-              # AI 컨텍스트 생성
-              system_prompt = f"""
+            system_prompt = f"""
                             당신은 월가 프롭트레이더 스타일의 전문 주식 분석 AI 어드바이저입니다.
                             현재 분석 중인 종목의 실시간 기술적 지표 데이터는 아래와 같습니다:
                             
@@ -949,14 +945,30 @@ if app_mode == "선택 종목 개별 정밀 분석":
                             3. 가독성을 높이기 위해 불렛포인트, bold 강조를 활용하세요.
                             """
 
-              response = client.models.generate_content(
-                  model="gemini-3.6-flash",
-                  contents=system_prompt,
-              )
-              advice = response.text
+            # 503 UNAVAILABLE 과부하 대비 3회 자동 재시도 로직 구현
+            max_retries = 3
+            advice = None
 
-            except Exception as e:
-              advice = f"❌ AI 연동 오류: {str(e)}"
+            for attempt in range(max_retries):
+              try:
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                response = client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=system_prompt,
+                )
+                advice = response.text
+                break  # 성공 시 반복문 탈출
+
+              except Exception as e:
+                err_msg = str(e)
+                if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                  if attempt < max_retries - 1:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                advice = (
+                    f"⚠️ Google AI 서버에 트래픽이 몰려 잠시 지연되고 있습니다."
+                    f" (오류: {err_msg})\n\n잠시 후 다시 시도해 주세요."
+                )
 
             st.markdown(advice)
             st.session_state["chat_history"].append(
