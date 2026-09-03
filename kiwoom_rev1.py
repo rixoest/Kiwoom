@@ -62,7 +62,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("⚡ 월가 & 코스피 프롭트레이딩 정밀 분석 및 TOP 5 추천 시스템")
+st.title("⚡ 주가 정밀 분석 및 TOP 5 추천 시스템")
 st.caption(
     "실시간 파동, 변동성(ATR), 수급 모멘텀, 시장 레짐 및 히스토리 백테스트 기반 매매 전략"
 )
@@ -1008,7 +1008,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
       # 스윙 전략 카드
       with st.container(border=True):
-        st.markdown("#### 🏆 [스윙 트레이딩] 중기 파동 전략")
+        st.markdown("#### 🏆 [스윙 트레이딩]전략 어드바이스")
         st.caption(
             "권장 보유기간: 3일 ~ 3주 | 이동평균선 및 ATR 조합 기반 3단계 분할 매수 & 2단계 분할 익절"
         )
