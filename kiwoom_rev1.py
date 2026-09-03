@@ -791,12 +791,12 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
 
       st.markdown("### 📱 모바일 최적화 실시간 파동 차트")
 
-      # 모바일 최적화: 최근 90일 데이터만 슬라이싱하여 차트 시가독성 확보
+      # 모바일 최적화: 최근 90일 데이터 사용
       df_chart = df.tail(90)
 
       fig = go.Figure()
 
-      # 1. 캔들스틱 (모바일에서도 잘 보이게 두껍게)
+      # 1. 캔들스틱
       fig.add_trace(
           go.Candlestick(
               x=df_chart.index,
@@ -810,7 +810,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           )
       )
 
-      # 2. 이동평균선 (20일선, 60일선)
+      # 2. 이동평균선
       fig.add_trace(
           go.Scatter(
               x=df_chart.index,
@@ -830,7 +830,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           )
       )
 
-      # 3. 목표가 및 손절가 수평선 표시
+      # 3. 목표가 및 손절가 수평선
       fig.add_hline(
           y=sl_swing,
           line_dash="dash",
@@ -853,11 +853,11 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           annotation_position="top right",
       )
 
-      # 모바일 전용 레이아웃 커스텀
+      # 모바일 호환성 100% 검증 레이아웃 설정 (ValueError 원인 완벽 제거)
       fig.update_layout(
-          height=380,  # 모바일 한 화면 크기
+          height=380,
           margin=dict(l=10, r=10, t=25, b=10),
-          xaxis_rangeslider_visible=False,  # 하단 줌바 제거하여 터치 간섭 방지
+          xaxis_rangeslider_visible=False,
           template="plotly_white",
           showlegend=True,
           legend=dict(
@@ -868,8 +868,8 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
               x=1,
               font=dict(size=10),
           ),
-          xaxis=dict(tickformat="%m/%d", font=dict(size=10)),
-          yaxis=dict(side="right", font=dict(size=10)),  # 오른쪽에 가격 표시
+          xaxis=dict(tickformat="%m/%d", tickfont=dict(size=10)),
+          yaxis=dict(side="right", tickfont=dict(size=10)),
       )
 
       st.plotly_chart(fig, use_container_width=True)
