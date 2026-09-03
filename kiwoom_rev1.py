@@ -8,6 +8,12 @@ import plotly.graph_objects as go
 import streamlit as st
 import ta
 import yfinance as yf
+from google import genai
+
+# ----------------------------------------------------
+# 0. Gemini API Key 로드 (Streamlit Secrets 활용)
+# ----------------------------------------------------
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 
 # ----------------------------------------------------
 # Streamlit Community Cloud 등 클라우드 환경 대응
@@ -59,6 +65,12 @@ st.set_page_config(
     page_icon="⚡",
     layout="wide",
 )
+
+# 화면 백지화 방지 및 AI 대화 내역 세션 초기화
+if "analysis_cache" not in st.session_state:
+  st.session_state["analysis_cache"] = None
+if "chat_history" not in st.session_state:
+  st.session_state["chat_history"] = []
 
 st.title("⚡ 주가 정밀분석 및 TOP 5 추천시스템")
 st.caption(
@@ -134,9 +146,7 @@ def get_usdkrw_rate():
   return 1350.0, err
 
 
-# ----------------------------------------------------
 # 시장 레짐(강세/약세) 판단
-# ----------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_index_trend(is_krx):
   ticker = "^KS11" if is_krx else "^GSPC"
@@ -404,7 +414,7 @@ def backtest_strategy(
   return trades_df, stats
 
 
-# 주식 데이터 수집 함수 (한국어 이름 보장 패치 적용)
+# 주식 데이터 수집 함수
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_stock_data(ticker, custom_display_name=None):
   if not ticker:
@@ -413,7 +423,6 @@ def fetch_stock_data(ticker, custom_display_name=None):
   is_krx = ticker.isdigit() or ticker.endswith(".KS") or ticker.endswith(".KQ")
   last_err = None
 
-  # 한국어 display_name 확정
   display_name = (
       custom_display_name or TICKER_TO_NAME.get(ticker) or ticker
   )
@@ -542,7 +551,9 @@ def scan_all_stocks(
   return res_df, regime_label, regime_icon, failed
 
 
+# ----------------------------------------------------
 # 2. 사이드바 설정
+# ----------------------------------------------------
 st.sidebar.header("⚙️ 트레이딩 분석 설정")
 
 app_mode = st.sidebar.radio(
@@ -630,36 +641,22 @@ if app_mode == "선택 종목 개별 정밀 분석":
       "🚀 정밀 분석 & 전략 생성", type="primary", use_container_width=True
   )
 
-  if run_analysis or "analyzed" not in st.session_state:
-    st.session_state["analyzed"] = True
-
+  # 분석 실행 및 데이터 세션 캐싱
+  if run_analysis or st.session_state["analysis_cache"] is None:
     df, stock_name, symbol_formatted, is_krx, fetch_err = fetch_stock_data(
         selected_ticker, custom_display_name=selected_display_name
     )
 
-    if df.empty or len(df) < 60:
-      st.error(
-          f"❌ [{selected_display_name}] 종목 데이터를 불러올 수 없습니다."
-          " 종목 코드나 데이터 수집 상태를 확인하세요."
-      )
-      if fetch_err:
-        st.caption(f"오류 상세: {fetch_err}")
-    else:
+    if not df.empty and len(df) >= 60:
       idx_df, idx_err = fetch_index_trend(is_krx)
       regime_label, regime_icon, regime_score = get_market_regime(idx_df)
-      if idx_err and debug_mode:
-        st.caption(f"⚠️ 지수(벤치마크) 데이터 조회 실패: {idx_err}")
       df = add_relative_strength(df, idx_df)
 
       curr = df.iloc[-1]
       curr_price = float(curr["close"])
-      curr_atr = (
-          float(curr["atr"]) if not pd.isna(curr["atr"]) else curr_price * 0.02
-      )
+      curr_atr = float(curr["atr"]) if not pd.isna(curr["atr"]) else curr_price * 0.02
       curr_rsi = float(curr["rsi"]) if not pd.isna(curr["rsi"]) else 50.0
-      vol_ratio = (
-          float(curr["vol_ratio"]) if not pd.isna(curr["vol_ratio"]) else 100.0
-      )
+      vol_ratio = float(curr["vol_ratio"]) if not pd.isna(curr["vol_ratio"]) else 100.0
 
       score, reasons, warns = compute_quant_score(curr)
       tier = get_recommendation_tier(score, regime_score)
@@ -667,326 +664,304 @@ if app_mode == "선택 종목 개별 정밀 분석":
       currency = "(원)" if is_krx else "($)"
       fmt = "{:,.0f}" if is_krx else "{:,.2f}"
 
-      bench_name = "코스피(KOSPI)" if is_krx else "S&P500"
-      if regime_score > 0:
-        st.success(
-            f"{regime_icon} 현재 {bench_name} 기준 시장 환경:"
-            f" **{regime_label}** — 추세 매매에 우호적인 환경입니다."
-        )
-      elif regime_score < 0:
-        st.error(
-            f"{regime_icon} 현재 {bench_name} 기준 시장 환경:"
-            f" **{regime_label}** — 개별 종목 신호가 좋아도 전체 시장 역풍에"
-            " 유의하세요."
-        )
-      else:
-        st.info(
-            f"{regime_icon} 현재 {bench_name} 기준 시장 환경:"
-            f" **{regime_label}**"
-        )
-
-      st.subheader(f"📌 {stock_name} - 실시간 종합 진단")
-      st.markdown(f"**종합 추천 등급: {tier}**")
-
-      m1, m2, m3, m4, m5 = st.columns(5)
-      m1.metric("현재가", f"{fmt.format(curr_price)} {currency}")
-      m2.metric("퀀트 점수", f"{score} / 100점")
-      m3.metric("14일 ATR (변동폭)", f"{fmt.format(curr_atr)}")
-      m4.metric("RSI (14)", f"{curr_rsi:.1f}")
-      if is_krx:
-        m5.metric("거래량 (20일 대비)", f"{vol_ratio:.1f}%")
-      else:
-        m5.metric("적용 환율 (원/달러)", f"{exchange_rate:,.1f} 원")
-
-      if warns:
-        st.warning("⚠️ 유의사항: " + " / ".join(warns))
-
-      st.markdown("---")
-
       capital_curr = capital if is_krx else capital / exchange_rate
       max_risk_cash = capital_curr * (risk_pct / 100.0)
 
-      ma5_val = (
-          float(curr["ma5"]) if not pd.isna(curr["ma5"]) else curr_price
-      )
-      ma20_val = (
-          float(curr["ma20"]) if not pd.isna(curr["ma20"]) else curr_price * 0.98
-      )
-      ma60_val = (
-          float(curr["ma60"]) if not pd.isna(curr["ma60"]) else curr_price * 0.95
-      )
+      ma5_val = float(curr["ma5"]) if not pd.isna(curr["ma5"]) else curr_price
+      ma20_val = float(curr["ma20"]) if not pd.isna(curr["ma20"]) else curr_price * 0.98
+      ma60_val = float(curr["ma60"]) if not pd.isna(curr["ma60"]) else curr_price * 0.95
 
       entry1_price = min(ma5_val, curr_price - 0.5 * curr_atr)
       entry2_price = min(entry1_price - 1.0 * curr_atr, ma20_val)
       entry3_price = min(entry1_price - 2.0 * curr_atr, ma60_val)
 
-      avg_entry_price = (
-          (entry1_price * 0.3) + (entry2_price * 0.4) + (entry3_price * 0.3)
-      )
+      avg_entry_price = (entry1_price * 0.3) + (entry2_price * 0.4) + (entry3_price * 0.3)
 
       stop_dist_swing = curr_atr * 1.5
       sl_swing = avg_entry_price - stop_dist_swing
       tp1_swing = avg_entry_price + (stop_dist_swing * 1.5)
       tp2_swing = avg_entry_price + (stop_dist_swing * 2.5)
 
-      max_affordable_qty_swing = (
-          int(capital_curr // avg_entry_price) if avg_entry_price > 0 else 0
-      )
-      raw_qty_swing = (
-          int(max_risk_cash / stop_dist_swing) if stop_dist_swing > 0 else 0
-      )
+      max_affordable_qty_swing = int(capital_curr // avg_entry_price) if avg_entry_price > 0 else 0
+      raw_qty_swing = int(max_risk_cash / stop_dist_swing) if stop_dist_swing > 0 else 0
       qty_swing = min(raw_qty_swing, max_affordable_qty_swing)
-
       if score < 35:
         qty_swing = 0
 
-      weak_signal = score < 35
+      trades_df, bt_stats = backtest_strategy(df, score_threshold=score_threshold)
 
-      def zero_qty_reason(raw_qty, stop_dist, max_aff):
-        if max_aff == 0:
-          return (
-              f"보유 자본(약 {fmt.format(capital_curr)} {currency})으로 매수"
-              " 가이드 가격의 1주도 구매할 수 없습니다."
-          )
-        if raw_qty == 0:
-          return (
-              f"1회 리스크 한도(약 {fmt.format(max_risk_cash)} {currency})가"
-              " 이 전략의 손절폭보다 작아 리스크 관리 규칙상 0주가"
-              " 산출되었습니다."
-          )
-        return None
+      st.session_state["analysis_cache"] = {
+          "df": df,
+          "stock_name": stock_name,
+          "symbol_formatted": symbol_formatted,
+          "is_krx": is_krx,
+          "regime_label": regime_label,
+          "regime_icon": regime_icon,
+          "regime_score": regime_score,
+          "curr_price": curr_price,
+          "curr_atr": curr_atr,
+          "curr_rsi": curr_rsi,
+          "vol_ratio": vol_ratio,
+          "score": score,
+          "reasons": reasons,
+          "warns": warns,
+          "tier": tier,
+          "currency": currency,
+          "fmt": fmt,
+          "capital_curr": capital_curr,
+          "max_risk_cash": max_risk_cash,
+          "entry1_price": entry1_price,
+          "entry2_price": entry2_price,
+          "entry3_price": entry3_price,
+          "avg_entry_price": avg_entry_price,
+          "stop_dist_swing": stop_dist_swing,
+          "sl_swing": sl_swing,
+          "tp1_swing": tp1_swing,
+          "tp2_swing": tp2_swing,
+          "qty_swing": qty_swing,
+          "trades_df": trades_df,
+          "bt_stats": bt_stats,
+          "ma20_val": ma20_val,
+          "ma60_val": ma60_val,
+      }
+      if run_analysis:
+        st.session_state["chat_history"] = []
 
-      swing_zero_reason = (
-          zero_qty_reason(
-              raw_qty_swing, stop_dist_swing, max_affordable_qty_swing
-          )
-          if qty_swing == 0
-          else None
-      )
+  cache = st.session_state.get("analysis_cache")
 
-      st.markdown("### 📱 모바일 최적화 실시간 파동 차트")
+  if cache is None:
+    st.info("👈 왼쪽 사이드바에서 종목 설정 후 **[🚀 정밀 분석 & 전략 생성]** 버튼을 클릭해주세요.")
+  else:
+    bench_name = "코스피(KOSPI)" if cache["is_krx"] else "S&P500"
+    if cache["regime_score"] > 0:
+      st.success(f"{cache['regime_icon']} 현재 {bench_name} 기준 시장 환경: **{cache['regime_label']}** — 추세 매매에 우호적인 환경입니다.")
+    elif cache["regime_score"] < 0:
+      st.error(f"{cache['regime_icon']} 현재 {bench_name} 기준 시장 환경: **{cache['regime_label']}** — 개별 종목 신호가 좋아도 전체 시장 역풍에 유의하세요.")
+    else:
+      st.info(f"{cache['regime_icon']} 현재 {bench_name} 기준 시장 환경: **{cache['regime_label']}**")
 
-      df_chart = df.tail(90)
-      fig = go.Figure()
+    st.subheader(f"📌 {cache['stock_name']} - 실시간 종합 진단")
+    st.markdown(f"**종합 추천 등급: {cache['tier']}**")
 
-      fig.add_trace(
-          go.Candlestick(
-              x=df_chart.index,
-              open=df_chart["open"],
-              high=df_chart["high"],
-              low=df_chart["low"],
-              close=df_chart["close"],
-              name="주가",
-              increasing_line_color="#E53935",
-              decreasing_line_color="#1E88E5",
-          )
-      )
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("현재가", f"{cache['fmt'].format(cache['curr_price'])} {cache['currency']}")
+    m2.metric("퀀트 점수", f"{cache['score']} / 100점")
+    m3.metric("14일 ATR (변동폭)", f"{cache['fmt'].format(cache['curr_atr'])}")
+    m4.metric("RSI (14)", f"{cache['curr_rsi']:.1f}")
+    if cache["is_krx"]:
+      m5.metric("거래량 (20일 대비)", f"{cache['vol_ratio']:.1f}%")
+    else:
+      m5.metric("적용 환율 (원/달러)", f"{exchange_rate:,.1f} 원")
 
-      fig.add_trace(
-          go.Scatter(
-              x=df_chart.index,
-              y=df_chart["ma20"],
-              mode="lines",
-              name="20일선",
-              line=dict(color="#FF9800", width=1.5),
-          )
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df_chart.index,
-              y=df_chart["ma60"],
-              mode="lines",
-              name="60일선",
-              line=dict(color="#4CAF50", width=1.5),
-          )
-      )
+    if cache["warns"]:
+      st.warning("⚠️ 유의사항: " + " / ".join(cache["warns"]))
 
-      fig.add_hline(
-          y=sl_swing,
-          line_dash="dash",
-          line_color="#D32F2F",
-          annotation_text="손절(SL)",
-          annotation_position="bottom right",
-      )
-      fig.add_hline(
-          y=tp1_swing,
-          line_dash="dash",
-          line_color="#2E7D32",
-          annotation_text="1차목표",
-          annotation_position="top right",
-      )
-      fig.add_hline(
-          y=tp2_swing,
-          line_dash="dash",
-          line_color="#1B5E20",
-          annotation_text="2차목표",
-          annotation_position="top right",
-      )
+    st.markdown("---")
 
-      fig.update_layout(
-          height=380,
-          margin=dict(l=10, r=10, t=25, b=10),
-          xaxis_rangeslider_visible=False,
-          template="plotly_white",
-          showlegend=True,
-          legend=dict(
-              orientation="h",
-              yanchor="bottom",
-              y=1.02,
-              xanchor="right",
-              x=1,
-              font=dict(size=10),
-          ),
-          xaxis=dict(tickformat="%m/%d", tickfont=dict(size=10)),
-          yaxis=dict(side="right", tickfont=dict(size=10)),
-      )
+    st.markdown("### 📱 모바일 최적화 실시간 파동 차트")
+    df_chart = cache["df"].tail(90)
+    fig = go.Figure()
 
-      st.plotly_chart(fig, use_container_width=True)
-
-      st.markdown("---")
-
-      st.markdown("### 🧪 히스토리 백테스트 (동일 로직의 과거 승률 검증)")
-      trades_df, bt_stats = backtest_strategy(
-          df, score_threshold=score_threshold
-      )
-
-      if bt_stats["trades"] == 0:
-        st.info(
-            "최근 2년간 해당 임계 점수 이상의 신호가 충분히 발생하지 않아"
-            " 통계적으로 유의미한 백테스트 결과가 없습니다."
+    fig.add_trace(
+        go.Candlestick(
+            x=df_chart.index,
+            open=df_chart["open"],
+            high=df_chart["high"],
+            low=df_chart["low"],
+            close=df_chart["close"],
+            name="주가",
+            increasing_line_color="#E53935",
+            decreasing_line_color="#1E88E5",
         )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df_chart.index,
+            y=df_chart["ma20"],
+            mode="lines",
+            name="20일선",
+            line=dict(color="#FF9800", width=1.5),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df_chart.index,
+            y=df_chart["ma60"],
+            mode="lines",
+            name="60일선",
+            line=dict(color="#4CAF50", width=1.5),
+        )
+    )
+
+    fig.add_hline(
+        y=cache["sl_swing"],
+        line_dash="dash",
+        line_color="#D32F2F",
+        annotation_text="손절(SL)",
+        annotation_position="bottom right",
+    )
+    fig.add_hline(
+        y=cache["tp1_swing"],
+        line_dash="dash",
+        line_color="#2E7D32",
+        annotation_text="1차목표",
+        annotation_position="top right",
+    )
+    fig.add_hline(
+        y=cache["tp2_swing"],
+        line_dash="dash",
+        line_color="#1B5E20",
+        annotation_text="2차목표",
+        annotation_position="top right",
+    )
+
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=25, b=10),
+        xaxis_rangeslider_visible=False,
+        template="plotly_white",
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=10),
+        ),
+        xaxis=dict(tickformat="%m/%d", tickfont=dict(size=10)),
+        yaxis=dict(side="right", tickfont=dict(size=10)),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    st.markdown("### 🧪 히스토리 백테스트 (동일 로직의 과거 승률 검증)")
+    bt_stats = cache["bt_stats"]
+    trades_df = cache["trades_df"]
+
+    if bt_stats["trades"] == 0:
+      st.info("최근 2년간 해당 임계 점수 이상의 신호가 충분히 발생하지 않아 통계적으로 유의미한 백테스트 결과가 없습니다.")
+    else:
+      b1, b2, b3, b4 = st.columns(4)
+      b1.metric("과거 승률", f"{bt_stats['win_rate']:.1f}%")
+      b2.metric("거래 횟수", f"{bt_stats['trades']}회")
+      b3.metric("평균 수익률/거래", f"{bt_stats['avg_return']:.2f}%")
+      pf = bt_stats["profit_factor"]
+      b4.metric("손익비(Profit Factor)", f"{pf:.2f}" if pf != np.inf else "∞")
+
+      with st.expander("개별 거래 내역 보기"):
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    st.markdown("### 🎯 매매 전략 및 산출 근거")
+
+    if cache["score"] < 35:
+      st.warning("🔴 현재 퀀트 점수가 35점 미만으로 매수 신호로 보기 어렵습니다. 실제 매수 수량은 0으로 제시됩니다.")
+
+    if cache["is_krx"]:
+      swing_buy_val = f"약 {cache['qty_swing'] * cache['avg_entry_price']:,.0f} 원"
+      swing_risk_val = f"**{cache['max_risk_cash']:,.0f} 원**"
+    else:
+      swing_buy_val = f"약 ${cache['qty_swing'] * cache['avg_entry_price']:,.2f} (약 {cache['qty_swing'] * cache['avg_entry_price'] * exchange_rate:,.0f} 원)"
+      swing_risk_val = f"**${cache['max_risk_cash']:,.2f}** (약 {cache['max_risk_cash'] * exchange_rate:,.0f} 원)"
+
+    with st.container(border=True):
+      st.markdown("#### 🏆 전략 어드바이스")
+      st.caption("권장 보유기간: 3일 ~ 3주 | 이동평균선 및 ATR 조합 기반 3단계 분할 매수 & 2단계 분할 익절")
+      st.markdown(
+          f"""
+              * **추천 매수 수량:** <span style="font-size:18px; color:#2E7D32; font-weight:bold;">{cache['qty_swing']:,} 주</span> ({swing_buy_val})
+              * **최대 허용 손실금:** {swing_risk_val} (전체 자본의 {risk_pct}%)
+              * **🎯 정밀 3단계 분할 매수 가이드:**
+                  * **1차 진입 (비중 30%):** {cache['fmt'].format(cache['entry1_price'])} {cache['currency']}
+                  * **2차 진입 (비중 40%):** <span style="color:#1976D2; font-weight:bold;">{cache['fmt'].format(cache['entry2_price'])} {cache['currency']}</span>
+                  * **3차 진입 (비중 30%):** <span style="color:#1976D2; font-weight:bold;">{cache['fmt'].format(cache['entry3_price'])} {cache['currency']}</span>
+                  * **💡 예상 체결 평단가:** **{cache['fmt'].format(cache['avg_entry_price'])} {cache['currency']}**
+              * **확정 손절가 (SL):** <span style="color:#D32F2F; font-weight:bold;">{cache['fmt'].format(cache['sl_swing'])} {cache['currency']}</span>
+              * **목표가 (분할 익절 가이드):**
+                  * **1차 목표가 (50% 익절):** <span style="color:#2E7D32; font-weight:bold;">{cache['fmt'].format(cache['tp1_swing'])} {cache['currency']}</span>
+                  * **2차 목표가 (50% 익절):** <span style="color:#2E7D32; font-weight:bold;">{cache['fmt'].format(cache['tp2_swing'])} {cache['currency']}</span>
+              """,
+          unsafe_allow_html=True,
+      )
+
+    # ----------------------------------------------------
+    # [핵심] Gemini API 연동 실시간 Q&A AI 어드바이저
+    # ----------------------------------------------------
+    st.markdown("---")
+    st.subheader(f"💬 {cache['stock_name']} 실시간 AI 어드바이저 Q&A")
+    st.caption("Gemini AI가 현재 종목 데이터와 사용자의 질문을 직접 해석하고 진입가/손절가를 재계산해 드립니다.")
+
+    # 1. 기존 대화 기록 출력
+    for message in st.session_state["chat_history"]:
+      with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+    # 2. 질문 처리 및 Gemini 연동
+    if prompt := st.chat_input(
+        f"예: {cache['stock_name']} 1차 진입가가 너무 낮아. 현재가 근처로 조정해서 다시 산출해줘"
+    ):
+      st.session_state["chat_history"].append({"role": "user", "content": prompt})
+      with st.chat_message("user"):
+        st.write(prompt)
+
+      if not GEMINI_API_KEY:
+        advice = "⚠️ Streamlit Secrets에 `GEMINI_API_KEY`가 설정되어 있지 않습니다."
+        st.session_state["chat_history"].append(
+            {"role": "assistant", "content": advice}
+        )
+        with st.chat_message("assistant"):
+          st.warning(advice)
       else:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("과거 승률", f"{bt_stats['win_rate']:.1f}%")
-        b2.metric("거래 횟수", f"{bt_stats['trades']}회")
-        b3.metric("평균 수익률/거래", f"{bt_stats['avg_return']:.2f}%")
-        pf = bt_stats["profit_factor"]
-        b4.metric(
-            "손익비(Profit Factor)", f"{pf:.2f}" if pf != np.inf else "∞"
-        )
+        with st.chat_message("assistant"):
+          with st.spinner("AI가 질문을 분석하여 맞춤 매매 전략을 재산출 중입니다..."):
+            try:
+              client = genai.Client(api_key=GEMINI_API_KEY)
 
-        with st.expander("개별 거래 내역 보기"):
-          st.dataframe(trades_df, use_container_width=True, hide_index=True)
+              # AI 컨텍스트 생성
+              system_prompt = f"""
+                            당신은 월가 프롭트레이더 스타일의 전문 주식 분석 AI 어드바이저입니다.
+                            현재 분석 중인 종목의 실시간 기술적 지표 데이터는 아래와 같습니다:
+                            
+                            - 종목명: {cache['stock_name']} ({cache['symbol_formatted']})
+                            - 현재가: {cache['curr_price']} {cache['currency']}
+                            - 퀀트 점수: {cache['score']}점 / 100점 (추천 등급: {cache['tier']})
+                            - 14일 ATR (변동폭): {cache['curr_atr']}
+                            - 기존 1차 진입가: {cache['entry1_price']} {cache['currency']}
+                            - 기존 2차 진입가: {cache['entry2_price']} {cache['currency']}
+                            - 기존 3차 진입가: {cache['entry3_price']} {cache['currency']}
+                            - 기존 예상 평단가: {cache['avg_entry_price']} {cache['currency']}
+                            - 기존 손절가(SL): {cache['sl_swing']} {cache['currency']}
+                            - 1차 목표가: {cache['tp1_swing']}, 2차 목표가: {cache['tp2_swing']}
+                            - 보유 수량: {cache['qty_swing']}주 (리스크 금: {cache['max_risk_cash']} {cache['currency']})
+                            - RSI: {cache['curr_rsi']:.1f}, 거래량 비율: {cache['vol_ratio']:.1f}%
 
-      st.markdown("---")
+                            [사용자 질문]: {prompt}
 
-      st.markdown("### 🎯 매매 전략 및 산출 근거")
+                            [답변 수칙]:
+                            1. 사용자가 진입가를 올려달라거나 조정해달라고 요청하는 경우:
+                               - 현재가({cache['curr_price']}) 근처(예: 현재가 대비 -0.5% ~ -1.5% 수준)로 1차 진입가를 수정했을 때의 새로운 진입가, 평단가, 손절가, 추천 수량을 즉시 수식 기반으로 재산출하여 대안으로 제시하세요.
+                            2. 뻔하거나 반복되는 기계적 문구를 사용하지 말고, 트레이더 관점에서 정밀하게 분석하세요.
+                            3. 가독성을 높이기 위해 불렛포인트, bold 강조를 활용하세요.
+                            """
 
-      if weak_signal:
-        st.warning(
-            "🔴 현재 퀀트 점수가 35점 미만으로 매수 신호로 보기 어렵습니다. 아래"
-            " 수치는 참고용 시뮬레이션이며, 실제 매수 수량은 0으로 제시됩니다."
-        )
+              response = client.models.generate_content(
+                  model="gemini-2.5-flash",
+                  contents=system_prompt,
+              )
+              advice = response.text
 
-      if is_krx:
-        risk_desc = f"{max_risk_cash:,.0f}원"
-        swing_buy_val = f"약 {qty_swing * avg_entry_price:,.0f} 원"
-        swing_risk_val = f"**{max_risk_cash:,.0f} 원**"
-      else:
-        risk_desc = (
-            f"${max_risk_cash:,.2f} (약 {max_risk_cash * exchange_rate:,.0f}원)"
-        )
-        swing_buy_val = (
-            f"약 ${qty_swing * avg_entry_price:,.2f} (약"
-            f" {qty_swing * avg_entry_price * exchange_rate:,.0f} 원)"
-        )
-        swing_risk_val = (
-            f"**${max_risk_cash:,.2f}** (약"
-            f" {max_risk_cash * exchange_rate:,.0f} 원)"
-        )
+            except Exception as e:
+              advice = f"❌ AI 연동 오류: {str(e)}"
 
-      dynamic_reasons = []
-
-      if curr_price > ma20_val and ma20_val > ma60_val:
-        dynamic_reasons.append(
-            f"**[추세]** {stock_name}은(는) 현재 정배열 구도로 단기 및 중기"
-            f" 주가가 이동평균선(20일: {fmt.format(ma20_val)}, 60일:"
-            f" {fmt.format(ma60_val)}) 위에서 안정적인 정배열 상승 흐름을"
-            " 유지하고 있습니다."
-        )
-      elif curr_price > ma20_val:
-        dynamic_reasons.append(
-            f"**[추세]** 60일선 대비 상단 반등 중이며, 현재 20일선({fmt.format(ma20_val)})을"
-            " 상회하여 단기 반등 모멘텀이 살아있습니다."
-        )
-      else:
-        dynamic_reasons.append(
-            f"**[추세]** 현재 주가가 20일 이동평균선({fmt.format(ma20_val)}) 밑에"
-            " 위치해 있어 성급한 추격 매수보다는 눌림목 분할 진입이"
-            " 유효합니다."
-        )
-
-      if curr_rsi >= 70:
-        dynamic_reasons.append(
-            f"**[모멘텀]** RSI가 {curr_rsi:.1f}로 과매수 구간에 진입해 있어 1차"
-            f" 진입가({fmt.format(entry1_price)}) 수준까지의 단기 숨고르기를"
-            " 기다리는 전략을 권장합니다."
-        )
-      elif 40 <= curr_rsi < 70:
-        dynamic_reasons.append(
-            f"**[모멘텀]** RSI가 {curr_rsi:.1f}로 과열되지 않은 건전한 수급 상승"
-            " 영역에 위치해 안정적인 매수 구간입니다."
-        )
-      else:
-        dynamic_reasons.append(
-            f"**[모멘텀]** RSI가 {curr_rsi:.1f}로 침체 구간에 위치하여"
-            " 반등을 겨냥한 보수적 분할 매수가 타당합니다."
-        )
-
-      if vol_ratio >= 120:
-        dynamic_reasons.append(
-            f"**[수급]** 최근 거래량이 20일 평균 대비 {vol_ratio:.1f}% 증가하며"
-            " 강한 매수 세력 유입 신호가 포착되었습니다."
-        )
-      else:
-        dynamic_reasons.append(
-            f"**[수급]** 거래량이 20일 평균의 {vol_ratio:.1f}% 수준으로 돌파형"
-            " 거래량은 미진하므로, 지지선 근접 시 지지 여부를 확인하는 분할"
-            " 접근이 안전합니다."
-        )
-
-      dynamic_reasons.append(
-          f"**[가격/리스크]** 최근 14일 평균 변동폭(ATR: {fmt.format(curr_atr)})을"
-          f" 반영하여, 손절가를 평단 대비 {stop_dist_swing:,.1f}"
-          f" 하단({fmt.format(sl_swing)})으로 정했습니다. 이는 계좌 자본"
-          f" 위험을 정확히 **{risk_pct}%({risk_desc})** 이내로 제한하기"
-          " 위함입니다."
-      )
-
-      reason_bullets = "\n".join([f"* {r}" for r in dynamic_reasons])
-
-      with st.expander(
-          f"💡 **[{stock_name} 맞춤 분석] 개별 전략 수립 근거**",
-          expanded=True,
-      ):
-        st.markdown(f"""
-                {reason_bullets}
-                * **[시장 레짐 종합]** 현재 {bench_name} 지수는 **{regime_label}** 상태로, 이 시장 환경과 {stock_name}의 기술적 지표(퀀트 {score}점)를 종합 계산하여 최적의 수량({qty_swing}주)과 타겟 가격을 산출했습니다.
-                """)
-
-      with st.container(border=True):
-        st.markdown("#### 🏆 전략 어드바이스")
-        st.caption(
-            "권장 보유기간: 3일 ~ 3주 | 이동평균선 및 ATR 조합 기반 3단계 분할 매수 & 2단계 분할 익절"
-        )
-        st.markdown(
-            f"""
-                * **추천 매수 수량:** <span style="font-size:18px; color:#2E7D32; font-weight:bold;">{qty_swing:,} 주</span> ({swing_buy_val})
-                * **최대 허용 손실금:** {swing_risk_val} (전체 자본의 {risk_pct}%)
-                * **🎯 정밀 3단계 분할 매수 가이드:**
-                    * **1차 진입 (비중 30% - 단기 눌림목):** {fmt.format(entry1_price)} {currency} `Min(5일선, 현재가-0.5*ATR)`
-                    * **2차 진입 (비중 40% - 중기 추세 지지):** <span style="color:#1976D2; font-weight:bold;">{fmt.format(entry2_price)} {currency}</span> `Min(1차진입가-1.0*ATR, 20일선)`
-                    * **3차 진입 (비중 30% - 강한 하한 지지):** <span style="color:#1976D2; font-weight:bold;">{fmt.format(entry3_price)} {currency}</span> `Min(1차진입가-2.0*ATR, 60일선)`
-                    * **💡 예상 체결 평단가:** **{fmt.format(avg_entry_price)} {currency}**
-                * **확정 손절가 (SL):** <span style="color:#D32F2F; font-weight:bold;">{fmt.format(sl_swing)} {currency}</span> (평단 대비 -{(stop_dist_swing/avg_entry_price)*100:.2f}%)
-                * **목표가 (분할 익절 가이드):**
-                    * **1차 목표가 (50% 익절):** <span style="color:#2E7D32; font-weight:bold;">{fmt.format(tp1_swing)} {currency}</span> (평단 대비 +{((tp1_swing/avg_entry_price)-1)*100:.2f}%)
-                    * **2차 목표가 (50% 익절):** <span style="color:#2E7D32; font-weight:bold;">{fmt.format(tp2_swing)} {currency}</span> (평단 대비 +{((tp2_swing/avg_entry_price)-1)*100:.2f}%)
-                """,
-            unsafe_allow_html=True,
-        )
-        if swing_zero_reason:
-          st.info(f"ℹ️ 추천 수량이 0주인 이유: {swing_zero_reason}")
+            st.markdown(advice)
+            st.session_state["chat_history"].append(
+                {"role": "assistant", "content": advice}
+            )
 
 
 # ----------------------------------------------------
