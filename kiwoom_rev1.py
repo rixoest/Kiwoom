@@ -679,7 +679,7 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
       score, reasons, warns = compute_quant_score(curr)
       tier = get_recommendation_tier(score, regime_score)
 
-      currency = "KRW (원)" if is_krx else "USD ($)"
+      currency = "원" if is_krx else "USD ($)"
       fmt = "{:,.0f}" if is_krx else "{:,.2f}"
 
       bench_name = "코스피(KOSPI)" if is_krx else "S&P500"
