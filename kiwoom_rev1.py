@@ -685,7 +685,10 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
             f" **{regime_label}**"
         )
 
-      st.subheader(f"📌 {stock_name} ({symbol_formatted}) - 실시간 종합 진단")
+      if "(" in stock_name:  
+        st.subheader(f"📌 {stock_name} - 실시간 종합 진단")
+      else:
+        st.subheader(f"📌 {stock_name} ({symbol_formatted}) - 실시간 종합 진단")
       st.markdown(f"**종합 추천 등급: {tier}**")
 
       m1, m2, m3, m4, m5 = st.columns(5)
@@ -1021,9 +1024,12 @@ else:
         for idx, row in top5_kr.iterrows():
           with st.container(border=True):
             col1, col2, col3, col4, col5 = st.columns([2, 1.7, 2, 2.2, 3])
-            col1.markdown(
-                f"### **{idx+1}위. {row['종목명']}**\n`{row['티커']}`\n\n{row['추천등급']}"
-            )
+           if "(" in row["종목명"]:
+             col1.markdown(f"### **{idx+1}위. {row['종목명']}**\n\n{row['추천등급']}")
+           else:
+             col1.markdown(
+               f"### **{idx+1}위. {row['종목명']}**\n`{row['티커']}`\n\n{row['추천등급']}"
+             )
             col2.metric("퀀트 점수", f"{row['퀀트점수']}점 / 100")
             win_disp = (
                 f"{row['과거승률(%)']}%"
