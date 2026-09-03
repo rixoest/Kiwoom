@@ -789,139 +789,89 @@ if app_mode == "🔍 선택 종목 개별 정밀 분석":
           else None
       )
 
-      st.markdown("### 📉 기술적 파동 및 목표/손절 라인 차트")
-      fig = make_subplots(
-          rows=3,
-          cols=1,
-          shared_xaxes=True,
-          vertical_spacing=0.03,
-          row_heights=[0.55, 0.2, 0.25],
-      )
+      st.markdown("### 📱 모바일 최적화 실시간 파동 차트")
 
+      # 모바일 최적화: 최근 90일 데이터만 슬라이싱하여 차트 시가독성 확보
+      df_chart = df.tail(90)
+
+      fig = go.Figure()
+
+      # 1. 캔들스틱 (모바일에서도 잘 보이게 두껍게)
       fig.add_trace(
           go.Candlestick(
-              x=df.index,
-              open=df["open"],
-              high=df["high"],
-              low=df["low"],
-              close=df["close"],
+              x=df_chart.index,
+              open=df_chart["open"],
+              high=df_chart["high"],
+              low=df_chart["low"],
+              close=df_chart["close"],
               name="주가",
-          ),
-          row=1,
-          col=1,
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["ma20"],
-              mode="lines",
-              name="20일선",
-              line=dict(color="orange", width=1.5),
-          ),
-          row=1,
-          col=1,
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["ma60"],
-              mode="lines",
-              name="60일선",
-              line=dict(color="green", width=1.5),
-          ),
-          row=1,
-          col=1,
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["bb_upper"],
-              mode="lines",
-              name="상한선",
-              line=dict(color="gray", dash="dash", width=1),
-          ),
-          row=1,
-          col=1,
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["bb_lower"],
-              mode="lines",
-              name="하한선",
-              line=dict(color="gray", dash="dash", width=1),
-          ),
-          row=1,
-          col=1,
+              increasing_line_color="#E53935",
+              decreasing_line_color="#1E88E5",
+          )
       )
 
+      # 2. 이동평균선 (20일선, 60일선)
+      fig.add_trace(
+          go.Scatter(
+              x=df_chart.index,
+              y=df_chart["ma20"],
+              mode="lines",
+              name="20일선",
+              line=dict(color="#FF9800", width=1.5),
+          )
+      )
+      fig.add_trace(
+          go.Scatter(
+              x=df_chart.index,
+              y=df_chart["ma60"],
+              mode="lines",
+              name="60일선",
+              line=dict(color="#4CAF50", width=1.5),
+          )
+      )
+
+      # 3. 목표가 및 손절가 수평선 표시
       fig.add_hline(
           y=sl_swing,
           line_dash="dash",
-          line_color="red",
-          annotation_text="스윙 손절가(SL)",
-          row=1,
-          col=1,
+          line_color="#D32F2F",
+          annotation_text="손절(SL)",
+          annotation_position="bottom right",
       )
       fig.add_hline(
           y=tp1_swing,
           line_dash="dash",
-          line_color="green",
-          annotation_text="1차 목표가",
-          row=1,
-          col=1,
+          line_color="#2E7D32",
+          annotation_text="1차목표",
+          annotation_position="top right",
       )
       fig.add_hline(
           y=tp2_swing,
           line_dash="dash",
-          line_color="darkgreen",
-          annotation_text="2차 목표가",
-          row=1,
-          col=1,
+          line_color="#1B5E20",
+          annotation_text="2차목표",
+          annotation_position="top right",
       )
 
-      fig.add_trace(
-          go.Bar(
-              x=df.index,
-              y=df["volume"],
-              name="거래량",
-              marker_color="lightblue",
-          ),
-          row=2,
-          col=1,
-      )
-
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["rsi"],
-              mode="lines",
-              name="RSI(14)",
-              line=dict(color="purple", width=1.3),
-          ),
-          row=3,
-          col=1,
-      )
-      fig.add_trace(
-          go.Scatter(
-              x=df.index,
-              y=df["adx"],
-              mode="lines",
-              name="ADX(추세강도)",
-              line=dict(color="black", width=1.3),
-          ),
-          row=3,
-          col=1,
-      )
-      fig.add_hline(y=70, line_dash="dot", line_color="red", row=3, col=1)
-      fig.add_hline(y=30, line_dash="dot", line_color="blue", row=3, col=1)
-
+      # 모바일 전용 레이아웃 커스텀
       fig.update_layout(
-          height=620,
-          xaxis_rangeslider_visible=False,
+          height=380,  # 모바일 한 화면 크기
+          margin=dict(l=10, r=10, t=25, b=10),
+          xaxis_rangeslider_visible=False,  # 하단 줌바 제거하여 터치 간섭 방지
           template="plotly_white",
-          margin=dict(l=10, r=10, t=10, b=10),
+          showlegend=True,
+          legend=dict(
+              orientation="h",
+              yanchor="bottom",
+              y=1.02,
+              xanchor="right",
+              x=1,
+              font=dict(size=10),
+          ),
+          xaxis=dict(tickformat="%m/%d", font=dict(size=10)),
+          yaxis=dict(side="right", font=dict(size=10)),  # 오른쪽에 가격 표시
       )
+
       st.plotly_chart(fig, use_container_width=True)
 
       st.markdown("---")
