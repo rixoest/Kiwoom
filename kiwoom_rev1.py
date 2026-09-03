@@ -950,7 +950,7 @@ if app_mode == "선택 종목 개별 정밀 분석":
                             """
 
               response = client.models.generate_content(
-                  model="gemini-2.5-flash",
+                  model="gemini-3.6-flash",
                   contents=system_prompt,
               )
               advice = response.text
