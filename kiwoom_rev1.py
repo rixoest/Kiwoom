@@ -116,7 +116,7 @@ STOCKS_US = {
     "마이크론 테크놀로지 (MU)": "MU",
     "엔비디아 (NVDA)": "NVDA",
     "로켓 랩 (RKLB)": "RKLB",
-    "샌디스크 (SNDK)": "SNDK",
+    "샌디스크/웨스턴디지털 (WDC)": "WDC",
     "미국 반도체 3배 ETF (SOXL)": "SOXL",
     "QQQ 레버리지 3배 ETF (TQQQ)": "TQQQ",
     "테슬라 (TSLA)": "TSLA",
@@ -264,6 +264,7 @@ def compute_quant_score(curr):
       score += 10
       reasons.append(f"추세 강도 우수(ADX {adx:.0f})")
     elif adx < 15:
+      score -= 8
       warnings.append("추세 미약(횡보장) - 신호 신뢰도 낮음")
 
   rsi = curr.get("rsi", np.nan)
@@ -272,8 +273,10 @@ def compute_quant_score(curr):
       score += 15
       reasons.append("RSI 건전한 상승모멘텀")
     elif rsi > 75:
+      score -= 12
       warnings.append(f"RSI 과매수 경고({rsi:.0f})")
     elif rsi < 30:
+      score -= 6
       warnings.append(f"RSI 과매도 구간({rsi:.0f})")
 
   stoch_k = curr.get("stoch_k", np.nan)
@@ -304,9 +307,13 @@ def compute_quant_score(curr):
 
   pct_52 = curr.get("pct_from_52w_high", np.nan)
   if not pd.isna(pct_52) and pct_52 > -2:
+    score -= 5
     warnings.append("52주 신고가 근접 - 단기 변동성 유의")
 
-  return min(score, 100), reasons, warnings
+  # 기존에는 warnings가 점수에 전혀 반영되지 않아, 과매수/추세미약/고점근접
+  # 등 리스크 요인이 있어도 스코어가 그대로 유지되는 결함이 있었음(위에서 감점 반영).
+  # 상한뿐 아니라 하한도 0으로 고정해 음수 스코어가 나오지 않도록 클램프.
+  return max(0, min(score, 100)), reasons, warnings
 
 
 def get_recommendation_tier(score, regime_score):
@@ -494,11 +501,15 @@ def scan_all_stocks(
     e1 = min(ma5_val, curr_price - 0.5 * curr_atr)
     e2 = min(e1 - 1.0 * curr_atr, ma20_val)
     e3 = min(e1 - 2.0 * curr_atr, ma60_val)
+    e2 = min(e2, e1 - 0.3 * curr_atr)
+    e3 = min(e3, e2 - 0.3 * curr_atr)
 
     avg_price = (e1 * 0.3) + (e2 * 0.4) + (e3 * 0.3)
 
-    stop_dist = curr_atr * 1.5
-    sl_price = avg_price - stop_dist
+    # 손절가는 3차 진입가 기준(- 1.0*ATR 버퍼)으로 계산해 손절가가
+    # 3차 진입가보다 높아지는 모순을 방지 (단일종목 분석과 동일 로직)
+    sl_price = e3 - 1.0 * curr_atr
+    stop_dist = avg_price - sl_price
     tp1_price = avg_price + (stop_dist * 1.5)
     tp2_price = avg_price + (stop_dist * 2.5)
 
