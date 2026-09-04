@@ -116,7 +116,7 @@ STOCKS_US = {
     "마이크론 테크놀로지 (MU)": "MU",
     "엔비디아 (NVDA)": "NVDA",
     "로켓 랩 (RKLB)": "RKLB",
-    "샌디스크/웨스턴디지털 (WDC)": "WDC",
+    "샌디스크 (SNDK)": "SNDK",
     "미국 반도체 3배 ETF (SOXL)": "SOXL",
     "QQQ 레버리지 3배 ETF (TQQQ)": "TQQQ",
     "테슬라 (TSLA)": "TSLA",
