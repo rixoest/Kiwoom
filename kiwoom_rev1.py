@@ -675,10 +675,19 @@ if app_mode == "선택 종목 개별 정밀 분석":
       entry2_price = min(entry1_price - 1.0 * curr_atr, ma20_val)
       entry3_price = min(entry1_price - 2.0 * curr_atr, ma60_val)
 
+      # 이평선이 역배열되거나 60일선이 크게 하회할 경우에도 1차>2차>3차 순서를
+      # 항상 보장 (그렇지 않으면 분할매수 구조 자체가 깨짐)
+      entry2_price = min(entry2_price, entry1_price - 0.3 * curr_atr)
+      entry3_price = min(entry3_price, entry2_price - 0.3 * curr_atr)
+
       avg_entry_price = (entry1_price * 0.3) + (entry2_price * 0.4) + (entry3_price * 0.3)
 
-      stop_dist_swing = curr_atr * 1.5
-      sl_swing = avg_entry_price - stop_dist_swing
+      # 손절가는 '평단가 - 고정폭(ATR*1.5)'이 아니라 '최종(3차) 진입가 - 버퍼'로 계산.
+      # 기존 방식은 3차 진입가가 60일선에 의해 크게 밀려 내려갈 경우
+      # 손절가가 3차 진입가보다 높아져(=3차 체결 전에 이미 손절 발동) 전략이 모순되는 문제가 있었음.
+      sl_buffer_atr = 1.0
+      sl_swing = entry3_price - sl_buffer_atr * curr_atr
+      stop_dist_swing = avg_entry_price - sl_swing
       tp1_swing = avg_entry_price + (stop_dist_swing * 1.5)
       tp2_swing = avg_entry_price + (stop_dist_swing * 2.5)
 
@@ -870,6 +879,30 @@ if app_mode == "선택 종목 개별 정밀 분석":
       swing_risk_val = f"**${cache['max_risk_cash']:,.2f}** (약 {cache['max_risk_cash'] * exchange_rate:,.0f} 원)"
 
     with st.container(border=True):
+      st.markdown("#### 🔎 전략 산출 핵심 근거")
+      st.caption(
+          f"퀀트 스코어 **{cache['score']}점** · {cache['tier']} · "
+          f"시장 레짐 {cache['regime_icon']} {cache['regime_label']}"
+      )
+      basis_col1, basis_col2 = st.columns(2)
+      with basis_col1:
+        st.markdown("**✅ 매수 근거**")
+        if cache["reasons"]:
+          st.markdown("\n".join(f"- {r}" for r in cache["reasons"]))
+        else:
+          st.markdown("- 뚜렷한 매수 신호 없음")
+      with basis_col2:
+        st.markdown("**⚠️ 리스크 / 주의 요인**")
+        if cache["warns"]:
+          st.markdown("\n".join(f"- {w}" for w in cache["warns"]))
+        else:
+          st.markdown("- 특이 경고 요인 없음")
+      st.caption(
+          f"참고 지표 — RSI {cache['curr_rsi']:.1f} · 거래량비 {cache['vol_ratio']:.0f}% · "
+          f"ATR {cache['fmt'].format(cache['curr_atr'])} {cache['currency']}"
+      )
+
+    with st.container(border=True):
       st.markdown("#### 🏆 전략 어드바이스")
       st.caption("권장 보유기간: 3일 ~ 3주 | 이동평균선 및 ATR 조합 기반 3단계 분할 매수 & 2단계 분할 익절")
       st.markdown(
@@ -890,7 +923,7 @@ if app_mode == "선택 종목 개별 정밀 분석":
       )
 
     # ----------------------------------------------------
-    # [핵심] Gemini API 연동 실시간 Q&A AI 어드바이저 (503 대응 로직 반영)
+    # [핵심] Gemini API 연동 실시간 Q&A AI 어드바이저
     # ----------------------------------------------------
     st.markdown("---")
     st.subheader(f"💬 {cache['stock_name']} 실시간 AI 어드바이저 Q&A")
@@ -919,7 +952,11 @@ if app_mode == "선택 종목 개별 정밀 분석":
       else:
         with st.chat_message("assistant"):
           with st.spinner("AI가 질문을 분석하여 맞춤 매매 전략을 재산출 중입니다..."):
-            system_prompt = f"""
+            try:
+              client = genai.Client(api_key=GEMINI_API_KEY)
+
+              # AI 컨텍스트 생성
+              system_prompt = f"""
                             당신은 월가 프롭트레이더 스타일의 전문 주식 분석 AI 어드바이저입니다.
                             현재 분석 중인 종목의 실시간 기술적 지표 데이터는 아래와 같습니다:
                             
@@ -945,30 +982,14 @@ if app_mode == "선택 종목 개별 정밀 분석":
                             3. 가독성을 높이기 위해 불렛포인트, bold 강조를 활용하세요.
                             """
 
-            # 503 UNAVAILABLE 과부하 대비 3회 자동 재시도 로직 구현
-            max_retries = 3
-            advice = None
+              response = client.models.generate_content(
+                  model="gemini-3.6-flash",
+                  contents=system_prompt,
+              )
+              advice = response.text
 
-            for attempt in range(max_retries):
-              try:
-                client = genai.Client(api_key=GEMINI_API_KEY)
-                response = client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=system_prompt,
-                )
-                advice = response.text
-                break  # 성공 시 반복문 탈출
-
-              except Exception as e:
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg:
-                  if attempt < max_retries - 1:
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                advice = (
-                    f"⚠️ Google AI 서버에 트래픽이 몰려 잠시 지연되고 있습니다."
-                    f" (오류: {err_msg})\n\n잠시 후 다시 시도해 주세요."
-                )
+            except Exception as e:
+              advice = f"❌ AI 연동 오류: {str(e)}"
 
             st.markdown(advice)
             st.session_state["chat_history"].append(
