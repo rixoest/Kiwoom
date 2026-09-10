@@ -60,6 +60,35 @@ def _fetch_history_with_retry(symbol, period="2y", retries=2, base_delay=1.5):
   return None, pd.DataFrame(), last_err
 
 
+def get_live_price(symbol):
+  """일봉 종가(전일 종가)가 아닌, 프리마켓/애프터마켓을 포함한 실시간에
+  가까운 현재가를 가져온다. 실패 시 (None, None) 반환.
+  history()의 마지막 '일봉 종가'는 미국장이 아직 열리지 않았을 때
+  전일 정규장 종가이므로 프리마켓 변동폭이 반영되지 않는다."""
+  try:
+    t = _yf_ticker(symbol)
+    try:
+      info = t.get_info()
+    except Exception:
+      info = t.info
+    if not info:
+      return None, None
+
+    market_state = info.get("marketState", "")
+    price = info.get("regularMarketPrice")
+
+    if market_state in ("PRE", "PREPRE"):
+      price = info.get("preMarketPrice") or price
+    elif market_state in ("POST", "POSTPOST"):
+      price = info.get("postMarketPrice") or price
+
+    if price is None:
+      return None, market_state
+    return float(price), market_state
+  except Exception:
+    return None, None
+
+
 # 1. 페이지 레이아웃 설정
 st.set_page_config(
     page_title="월가&코스피 프롭트레이더 전략 시스템",
@@ -500,6 +529,9 @@ def scan_all_stocks(
     curr = df.iloc[-1]
     score, reasons, warns = compute_quant_score(curr)
     curr_price = float(curr["close"])
+    live_price, _ = get_live_price(sym)
+    if live_price:
+      curr_price = live_price
     curr_atr = (
         float(curr["atr"]) if not pd.isna(curr["atr"]) else curr_price * 0.02
     )
@@ -702,6 +734,9 @@ if app_mode == "선택 종목 개별 정밀 분석":
 
       curr = df.iloc[-1]
       curr_price = float(curr["close"])
+      live_price, market_state = get_live_price(symbol_formatted)
+      if live_price:
+        curr_price = live_price
       curr_atr = float(curr["atr"]) if not pd.isna(curr["atr"]) else curr_price * 0.02
       curr_rsi = float(curr["rsi"]) if not pd.isna(curr["rsi"]) else 50.0
       vol_ratio = float(curr["vol_ratio"]) if not pd.isna(curr["vol_ratio"]) else 100.0
@@ -756,6 +791,7 @@ if app_mode == "선택 종목 개별 정밀 분석":
           "regime_icon": regime_icon,
           "regime_score": regime_score,
           "curr_price": curr_price,
+          "market_state": market_state,
           "curr_atr": curr_atr,
           "curr_rsi": curr_rsi,
           "vol_ratio": vol_ratio,
@@ -801,7 +837,18 @@ if app_mode == "선택 종목 개별 정밀 분석":
     st.markdown(f"**종합 추천 등급: {cache['tier']}**")
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("현재가", f"{cache['fmt'].format(cache['curr_price'])} {cache['currency']}")
+    _market_state_label = {
+        "PRE": "🌅 프리마켓",
+        "PREPRE": "🌅 프리마켓",
+        "POST": "🌙 애프터마켓",
+        "POSTPOST": "🌙 애프터마켓",
+        "REGULAR": "🟢 정규장",
+        "CLOSED": "⚪ 장마감",
+    }.get(cache.get("market_state"), None)
+    m1.metric(
+        "현재가" + (f" ({_market_state_label})" if _market_state_label else ""),
+        f"{cache['fmt'].format(cache['curr_price'])} {cache['currency']}",
+    )
     m2.metric("퀀트 점수", f"{cache['score']} / 100점")
     m3.metric("14일 ATR (변동폭)", f"{cache['fmt'].format(cache['curr_atr'])}")
     m4.metric("RSI (14)", f"{cache['curr_rsi']:.1f}")
